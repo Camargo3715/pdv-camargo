@@ -1,0 +1,13 @@
+{
+  "cupom_largura": 40,
+  "loja": {
+    "nome": "MERCADO DO CARMO",
+    "cnpj": "45287315848",
+    "ie": "ISENTO",
+    "endereco": "Rua Ferdinando Ramponi",
+    "cidade": "Sua Cidade - UF",
+    "telefone": "(11) 96331-2827",
+    "mensagem": "OBRIGADO! VOLTE SEMPRE :)",
+    "mostrar_cupom_nao_fiscal": true
+  }
+}
