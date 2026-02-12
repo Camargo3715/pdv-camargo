@@ -5,13 +5,27 @@
 import os
 import sqlite3
 from datetime import datetime, timedelta, date
+
 import streamlit as st
 import pandas as pd
 
 APP_TITLE = "PDV Camargo Celulares — Web"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.getenv("DATABASE_PATH", os.path.join(BASE_DIR, "pdv.db"))
+
+# ✅ Render: use DATABASE_PATH (ex: /var/data/pdv.db) com Persistent Disk
+# ✅ Local: cai no pdv.db do projeto
+DEFAULT_DB = os.path.join(BASE_DIR, "pdv.db")
+DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB)
+
+# ✅ Garante que a pasta do banco exista (ex.: /var/data)
+try:
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+except Exception:
+    # se por algum motivo não puder criar a pasta, ainda tentaremos abrir o banco
+    pass
 
 
 # =========================
@@ -39,6 +53,7 @@ def inicializar_banco():
         )
         """)
 
+        # (LEGADO) mantém por compatibilidade
         cur.execute("""
         CREATE TABLE IF NOT EXISTS vendas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -426,7 +441,7 @@ def listar_vendas_itens_df(filtro_produto: str = ""):
             """,
             conn,
         )
-    if filtro:
+    if filtro and not df.empty:
         df = df[df["produto"].astype(str).str.lower().str.contains(filtro, na=False)]
     return df
 
@@ -521,7 +536,8 @@ def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float
     total_pagar = max(0.0, float(subtotal) - float(desconto))
 
     out = []
-    out.append(centralizar("CUPOM NAO FISCAL" if loja["mostrar_cupom_nao_fiscal"] else ""))
+    if loja["mostrar_cupom_nao_fiscal"]:
+        out.append(centralizar("CUPOM NAO FISCAL"))
     out.append(centralizar(loja["nome"]))
     if loja["cnpj"]:
         out.append(centralizar(f"CNPJ: {loja['cnpj']}"))
@@ -535,7 +551,7 @@ def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float
     for it in itens:
         nome = f"{it.get('produto','')} ({it.get('codigo','')})".strip()
         out.append(nome[:largura])
-        out.append(fmt_l2(int(it["qtd"]), float(it["preco_unit"]), float(it["total_item"])))
+        out.append(fmt_l2(int(it["qtd"]), float(it["preco_unit"]), float(it["total_item"])) )
 
     out.append(sep("-"))
     out.append(linha_valor("SUBTOTAL", subtotal))
@@ -557,6 +573,8 @@ def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float
 # App (UI)
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
+
+# ✅ inicializa após garantir pasta do DB
 inicializar_banco()
 
 if "cart" not in st.session_state:
@@ -565,7 +583,7 @@ if "cart" not in st.session_state:
 st.title(APP_TITLE)
 st.caption(f"DB: {DB_PATH}")
 
-# Navegação (como frames do Tkinter)
+# Navegação
 pagina = st.sidebar.radio("Navegação", ["🧾 Caixa (PDV)", "📦 Estoque", "📈 Histórico", "📅 Relatórios"], index=0)
 
 # Caixa (sidebar abrir/fechar sempre visível)
@@ -606,7 +624,13 @@ else:
         st.sidebar.dataframe(df_rel, use_container_width=True, hide_index=True)
 
     with st.sidebar.form("fechar_caixa"):
-        contado = st.number_input("Valor contado (informado)", min_value=0.0, step=10.0, value=float(saldo_final_sistema), format="%.2f")
+        contado = st.number_input(
+            "Valor contado (informado)",
+            min_value=0.0,
+            step=10.0,
+            value=float(saldo_final_sistema),
+            format="%.2f",
+        )
         obs_f = st.text_input("Observação (opcional)", value="")
         fechar = st.form_submit_button("🔒 Fechar Caixa")
     if fechar:
@@ -644,14 +668,16 @@ if pagina.startswith("🧾"):
                     if qtd > prod["quantidade"]:
                         st.error("Quantidade excede o estoque disponível.")
                     else:
-                        st.session_state.cart.append({
-                            "codigo": prod["codigo"],
-                            "produto": prod["nome"],
-                            "preco_unit": float(prod["preco_venda"]),
-                            "preco_custo": float(prod["preco_custo"]),
-                            "qtd": int(qtd),
-                            "total_item": float(prod["preco_venda"]) * int(qtd),
-                        })
+                        st.session_state.cart.append(
+                            {
+                                "codigo": prod["codigo"],
+                                "produto": prod["nome"],
+                                "preco_unit": float(prod["preco_venda"]),
+                                "preco_custo": float(prod["preco_custo"]),
+                                "qtd": int(qtd),
+                                "total_item": float(prod["preco_venda"]) * int(qtd),
+                            }
+                        )
                         st.success("Item adicionado!")
 
         st.subheader("Carrinho (editável)")
@@ -679,16 +705,17 @@ if pagina.startswith("🧾"):
                 row = edited.iloc[i].to_dict()
                 preco = float(row["preco_unit"])
                 qtd = int(row["qtd"])
-                # mantém preco_custo original se existir
                 custo = float(df_cart.iloc[i]["preco_custo"]) if "preco_custo" in df_cart.columns else 0.0
-                new_cart.append({
-                    "codigo": str(row["codigo"]),
-                    "produto": str(row["produto"]),
-                    "preco_unit": preco,
-                    "preco_custo": custo,
-                    "qtd": qtd,
-                    "total_item": preco * qtd,
-                })
+                new_cart.append(
+                    {
+                        "codigo": str(row["codigo"]),
+                        "produto": str(row["produto"]),
+                        "preco_unit": preco,
+                        "preco_custo": custo,
+                        "qtd": qtd,
+                        "total_item": preco * qtd,
+                    }
+                )
             st.session_state.cart = new_cart
 
             subtotal = float(sum(i["total_item"] for i in st.session_state.cart))
@@ -746,7 +773,7 @@ if pagina.startswith("🧾"):
                 if not st.session_state.cart:
                     st.error("Carrinho vazio.")
                 else:
-                    # valida estoque de cada item
+                    # valida estoque
                     for it in st.session_state.cart:
                         prod = buscar_produto_por_codigo(it["codigo"])
                         if not prod:
@@ -764,7 +791,7 @@ if pagina.startswith("🧾"):
                         st.error("Valor recebido menor que o total com desconto.")
                         st.stop()
 
-                    # baixar estoque no banco
+                    # baixar estoque
                     try:
                         for it in st.session_state.cart:
                             baixar_estoque_por_codigo(it["codigo"], int(it["qtd"]))
@@ -791,7 +818,6 @@ if pagina.startswith("🧾"):
                         st.error(f"Erro ao registrar venda: {e}")
                         st.stop()
 
-                    # cupom para download
                     numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{venda_id:06d}"
                     txt = cupom_txt(st.session_state.cart, numero_venda, forma_ui, float(desconto), float(recebido), float(troco))
 
@@ -825,9 +851,7 @@ elif pagina.startswith("📦"):
             venda_txt = st.text_input("Preço de venda", value="")
             qtd = st.number_input("Quantidade", min_value=0, step=1, value=0)
 
-            # auto calcula venda se preencher custo + %lucro e deixar venda vazio
             auto_calc = st.checkbox("Calcular venda automaticamente (custo + %)", value=True)
-
             salvar = st.form_submit_button("💾 Salvar (Upsert)")
 
         if salvar:
