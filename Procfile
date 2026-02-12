@@ -1,1 +1,2 @@
-﻿web: streamlit run web_pdv.py --server.port=$PORT --server.address=0.0.0.0
+﻿web: streamlit run pdv_web_full.py --server.port=$PORT --server.address=0.0.0.0
+
