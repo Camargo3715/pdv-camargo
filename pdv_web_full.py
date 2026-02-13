@@ -13,18 +13,27 @@ APP_TITLE = "PDV Camargo Celulares — Web"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ✅ Render: use DATABASE_PATH (ex: /var/data/pdv.db) com Persistent Disk
-# ✅ Local: cai no pdv.db do projeto
-DEFAULT_DB = os.path.join(BASE_DIR, "pdv.db")
-DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB)
+# =========================
+# DB PATH (Render / Local)
+# =========================
+DEFAULT_DB_LOCAL = os.path.join(BASE_DIR, "pdv.db")
 
-# ✅ Garante que a pasta do banco exista (ex.: /var/data)
+# Detecta Render
+IS_RENDER = bool(os.getenv("RENDER")) or bool(os.getenv("RENDER_SERVICE_ID"))
+
+# No Render Free, /var/data NÃO existe (sem Disk). Então usa /tmp.
+# Se você estiver no Render com Disk, pode setar DATABASE_PATH=/var/data/pdv.db
+if IS_RENDER:
+    DB_PATH = os.getenv("DATABASE_PATH", "/tmp/pdv.db")
+else:
+    DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB_LOCAL)
+
+# Garante que a pasta do banco exista
 try:
     db_dir = os.path.dirname(DB_PATH)
-    if db_dir and not os.path.exists(db_dir):
+    if db_dir:
         os.makedirs(db_dir, exist_ok=True)
 except Exception:
-    # se por algum motivo não puder criar a pasta, ainda tentaremos abrir o banco
     pass
 
 
@@ -32,9 +41,25 @@ except Exception:
 # Banco
 # =========================
 def conectar():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
+    """
+    Conecta no SQLite. Se o caminho atual falhar (permissão/pasta),
+    cai automaticamente para /tmp/pdv.db para não dar tela preta.
+    """
+    global DB_PATH
+    try:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.execute("PRAGMA foreign_keys = ON;")
+        return conn
+    except sqlite3.OperationalError:
+        # fallback final (Render Free)
+        DB_PATH = "/tmp/pdv.db"
+        try:
+            os.makedirs("/tmp", exist_ok=True)
+        except Exception:
+            pass
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.execute("PRAGMA foreign_keys = ON;")
+        return conn
 
 
 def inicializar_banco():
