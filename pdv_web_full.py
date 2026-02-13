@@ -1,9 +1,11 @@
 # pdv_web_full.py
-# PDV Camargo Celulares — Web (Streamlit) | Completo: Caixa + Estoque + Histórico + Relatórios
+# PDV Camargo Celulares — Web (Streamlit) | Completo: Caixa + Estoque + Histórico + Relatórios + Login
 # Compatível com o schema do seu pdv.py (produtos, caixa_sessoes, vendas_cabecalho, vendas_itens)
 
 import os
 import sqlite3
+import secrets
+import hashlib
 from datetime import datetime, timedelta, date
 
 import streamlit as st
@@ -141,6 +143,184 @@ def inicializar_banco():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_cabecalho_sessao ON vendas_cabecalho(sessao_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_itens_venda ON vendas_itens(venda_id)")
 
+        conn.commit()
+
+
+# =========================
+# Usuários / Auth (Login)
+# =========================
+def gerar_hash_senha(senha: str) -> tuple[str, str]:
+    """
+    PBKDF2-HMAC SHA256 com salt aleatório.
+    Retorna (salt_hex, hash_hex).
+    """
+    senha_b = (senha or "").encode("utf-8")
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", senha_b, salt, 120_000)
+    return salt.hex(), dk.hex()
+
+
+def verificar_senha(senha: str, salt_hex: str, hash_hex: str) -> bool:
+    senha_b = (senha or "").encode("utf-8")
+    salt = bytes.fromhex(salt_hex)
+    dk = hashlib.pbkdf2_hmac("sha256", senha_b, salt, 120_000)
+    return dk.hex() == (hash_hex or "")
+
+
+def inicializar_usuarios():
+    """
+    Cria a tabela usuarios e, se não existir nenhum usuário,
+    cria um ADMIN inicial usando ADMIN_USER/ADMIN_PASS (Render env),
+    ou padrão admin/admin123.
+    """
+    with conectar() as conn:
+        cur = conn.cursor()
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            nome TEXT,
+            role TEXT NOT NULL CHECK(role IN ('ADMIN','OPERADOR')),
+            pass_salt TEXT NOT NULL,
+            pass_hash TEXT NOT NULL,
+            ativo INTEGER NOT NULL DEFAULT 1,
+            criado_em TEXT NOT NULL
+        )
+        """)
+        conn.commit()
+
+        cur.execute("SELECT COUNT(*) FROM usuarios")
+        total = int(cur.fetchone()[0] or 0)
+
+        if total == 0:
+            admin_user = (os.getenv("ADMIN_USER") or "admin").strip().lower()
+            admin_pass = (os.getenv("ADMIN_PASS") or "admin123").strip()
+
+            salt, ph = gerar_hash_senha(admin_pass)
+            cur.execute(
+                """
+                INSERT INTO usuarios (username, nome, role, pass_salt, pass_hash, ativo, criado_em)
+                VALUES (?, ?, 'ADMIN', ?, ?, 1, ?)
+                """,
+                (admin_user, "Administrador", salt, ph, agora_iso()),
+            )
+            conn.commit()
+
+
+def get_usuario(username: str):
+    u = (username or "").strip().lower()
+    if not u:
+        return None
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, username, nome, role, pass_salt, pass_hash, ativo
+            FROM usuarios
+            WHERE username = ?
+            """,
+            (u,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row[0]),
+        "username": str(row[1]),
+        "nome": str(row[2] or ""),
+        "role": str(row[3]),
+        "salt": str(row[4]),
+        "hash": str(row[5]),
+        "ativo": int(row[6] or 0),
+    }
+
+
+def autenticar(username: str, senha: str):
+    user = get_usuario(username)
+    if not user:
+        return None
+    if user["ativo"] != 1:
+        return None
+    if not verificar_senha(senha, user["salt"], user["hash"]):
+        return None
+    return user
+
+
+def listar_usuarios_df():
+    with conectar() as conn:
+        return pd.read_sql_query(
+            """
+            SELECT username, nome, role, ativo, criado_em
+            FROM usuarios
+            ORDER BY role DESC, username ASC
+            """,
+            conn,
+        )
+
+
+def criar_usuario(username: str, nome: str, role: str, senha: str, ativo: int = 1):
+    username = (username or "").strip().lower()
+    nome = (nome or "").strip()
+    role = (role or "").strip().upper()
+
+    if role not in ("ADMIN", "OPERADOR"):
+        raise ValueError("Perfil inválido. Use ADMIN ou OPERADOR.")
+    if not username:
+        raise ValueError("Username é obrigatório.")
+    if len((senha or "").strip()) < 4:
+        raise ValueError("Senha muito curta (mín. 4).")
+
+    salt, ph = gerar_hash_senha(senha)
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO usuarios (username, nome, role, pass_salt, pass_hash, ativo, criado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (username, nome, role, salt, ph, int(1 if ativo else 0), agora_iso()),
+        )
+        conn.commit()
+
+
+def atualizar_usuario_role_ativo(username: str, role: str, ativo: int):
+    username = (username or "").strip().lower()
+    role = (role or "").strip().upper()
+    if role not in ("ADMIN", "OPERADOR"):
+        raise ValueError("Perfil inválido.")
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE usuarios
+            SET role = ?, ativo = ?
+            WHERE username = ?
+            """,
+            (role, int(1 if ativo else 0), username),
+        )
+        if cur.rowcount == 0:
+            raise ValueError("Usuário não encontrado.")
+        conn.commit()
+
+
+def atualizar_senha(username: str, nova_senha: str):
+    username = (username or "").strip().lower()
+    if len((nova_senha or "").strip()) < 4:
+        raise ValueError("Senha muito curta (mín. 4).")
+    salt, ph = gerar_hash_senha(nova_senha)
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE usuarios
+            SET pass_salt = ?, pass_hash = ?
+            WHERE username = ?
+            """,
+            (salt, ph, username),
+        )
+        if cur.rowcount == 0:
+            raise ValueError("Usuário não encontrado.")
         conn.commit()
 
 
@@ -373,7 +553,8 @@ def fechar_caixa_db(sessao_id: int, saldo_informado: float, obs: str = ""):
                 obs_fechamento = ?
             WHERE id = ? AND status='ABERTO'
             """,
-            (agora, float(saldo_final_sistema), float(saldo_informado), float(diferenca), (obs or "").strip(), int(sessao_id)),
+            (agora, float(saldo_final_sistema), float(saldo_informado), float(diferenca),
+             (obs or "").strip(), int(sessao_id)),
         )
         if cur.rowcount == 0:
             raise RuntimeError("Não foi possível fechar: sessão não está ABERTA (ou não existe).")
@@ -576,7 +757,7 @@ def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float
     for it in itens:
         nome = f"{it.get('produto','')} ({it.get('codigo','')})".strip()
         out.append(nome[:largura])
-        out.append(fmt_l2(int(it["qtd"]), float(it["preco_unit"]), float(it["total_item"])) )
+        out.append(fmt_l2(int(it["qtd"]), float(it["preco_unit"]), float(it["total_item"])))
 
     out.append(sep("-"))
     out.append(linha_valor("SUBTOTAL", subtotal))
@@ -599,8 +780,9 @@ def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# ✅ inicializa após garantir pasta do DB
+# inicializa tabelas
 inicializar_banco()
+inicializar_usuarios()
 
 if "cart" not in st.session_state:
     st.session_state.cart = []
@@ -608,10 +790,56 @@ if "cart" not in st.session_state:
 st.title(APP_TITLE)
 st.caption(f"DB: {DB_PATH}")
 
-# Navegação
-pagina = st.sidebar.radio("Navegação", ["🧾 Caixa (PDV)", "📦 Estoque", "📈 Histórico", "📅 Relatórios"], index=0)
+# =========================
+# Login (Sidebar)
+# =========================
+st.sidebar.divider()
+st.sidebar.header("🔐 Login")
 
+if "auth" not in st.session_state:
+    st.session_state.auth = None  # dict com user
+
+auth = st.session_state.auth
+
+if not auth:
+    with st.sidebar.form("login_form"):
+        u = st.text_input("Usuário", value="")
+        p = st.text_input("Senha", value="", type="password")
+        entrar = st.form_submit_button("Entrar")
+    if entrar:
+        user = autenticar(u, p)
+        if not user:
+            st.sidebar.error("Usuário/senha inválidos (ou usuário inativo).")
+        else:
+            st.session_state.auth = {
+                "username": user["username"],
+                "nome": user["nome"],
+                "role": user["role"],
+            }
+            st.rerun()
+
+    st.info("Faça login para usar o sistema.")
+    st.stop()
+else:
+    st.sidebar.success(f"Logado: {auth['username']} ({auth['role']})")
+    if st.sidebar.button("Sair"):
+        st.session_state.auth = None
+        st.rerun()
+
+# Navegação por perfil
+role = st.session_state.auth["role"]
+
+paginas = ["🧾 Caixa (PDV)", "📈 Histórico"]
+if role == "ADMIN":
+    paginas.insert(1, "📦 Estoque")
+    paginas.append("📅 Relatórios")
+    paginas.append("👤 Usuários (Admin)")
+
+pagina = st.sidebar.radio("Navegação", paginas, index=0)
+
+# =========================
 # Caixa (sidebar abrir/fechar sempre visível)
+# =========================
 st.sidebar.divider()
 st.sidebar.header("Caixa (Abertura/Fechamento)")
 sess = get_sessao_aberta()
@@ -619,7 +847,7 @@ sess = get_sessao_aberta()
 if not sess:
     st.sidebar.error("CAIXA FECHADO")
     with st.sidebar.form("abrir_caixa"):
-        operador = st.text_input("Operador (opcional)", value="")
+        operador = st.text_input("Operador (opcional)", value=auth.get("username", ""))
         saldo_ini = st.number_input("Saldo inicial (fundo)", min_value=0.0, step=10.0, format="%.2f")
         obs = st.text_input("Observação (opcional)", value="")
         ok = st.form_submit_button("🔓 Abrir Caixa")
@@ -752,7 +980,13 @@ if pagina.startswith("🧾"):
                     st.session_state.cart = []
                     st.rerun()
             with c2:
-                idx = st.number_input("Remover item (nº)", min_value=1, max_value=len(st.session_state.cart), value=1, step=1)
+                idx = st.number_input(
+                    "Remover item (nº)",
+                    min_value=1,
+                    max_value=len(st.session_state.cart),
+                    value=1,
+                    step=1,
+                )
             with c3:
                 if st.button("Remover"):
                     st.session_state.cart.pop(int(idx) - 1)
@@ -844,7 +1078,14 @@ if pagina.startswith("🧾"):
                         st.stop()
 
                     numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{venda_id:06d}"
-                    txt = cupom_txt(st.session_state.cart, numero_venda, forma_ui, float(desconto), float(recebido), float(troco))
+                    txt = cupom_txt(
+                        st.session_state.cart,
+                        numero_venda,
+                        forma_ui,
+                        float(desconto),
+                        float(recebido),
+                        float(troco),
+                    )
 
                     st.success(f"Venda registrada! Cupom/ID: {venda_id}")
                     st.download_button(
@@ -859,9 +1100,13 @@ if pagina.startswith("🧾"):
 
 
 # =========================
-# Página: Estoque
+# Página: Estoque (ADMIN)
 # =========================
 elif pagina.startswith("📦"):
+    if role != "ADMIN":
+        st.error("Acesso negado. Apenas ADMIN pode acessar o Estoque.")
+        st.stop()
+
     st.subheader("📦 Estoque — Produtos")
 
     cA, cB = st.columns([1, 1], gap="large")
@@ -952,9 +1197,71 @@ elif pagina.startswith("📈"):
 
 
 # =========================
-# Página: Relatórios (painel)
+# Página: Usuários (ADMIN)
+# =========================
+elif pagina.startswith("👤"):
+    if role != "ADMIN":
+        st.error("Acesso negado. Apenas ADMIN pode acessar Usuários.")
+        st.stop()
+
+    st.subheader("👤 Usuários (Admin)")
+
+    st.markdown("### Criar novo usuário")
+    with st.form("criar_usuario_form"):
+        nu = st.text_input("Username (ex: joao)", value="").strip().lower()
+        nn = st.text_input("Nome", value="")
+        nr = st.selectbox("Perfil", ["OPERADOR", "ADMIN"], index=0)
+        ns = st.text_input("Senha", value="", type="password")
+        nativo = st.checkbox("Ativo", value=True)
+        criar = st.form_submit_button("Criar")
+    if criar:
+        try:
+            criar_usuario(nu, nn, nr, ns, 1 if nativo else 0)
+            st.success("Usuário criado!")
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
+
+    st.divider()
+    st.markdown("### Lista de usuários")
+    dfu = listar_usuarios_df()
+    st.dataframe(dfu, use_container_width=True, hide_index=True)
+
+    st.markdown("### Alterar perfil / ativar/desativar")
+    with st.form("editar_usuario_form"):
+        eu = st.text_input("Username para editar", value="").strip().lower()
+        er = st.selectbox("Novo perfil", ["OPERADOR", "ADMIN"], index=0)
+        ea = st.checkbox("Ativo", value=True)
+        salvar = st.form_submit_button("Salvar alterações")
+    if salvar:
+        try:
+            atualizar_usuario_role_ativo(eu, er, 1 if ea else 0)
+            st.success("Atualizado!")
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
+
+    st.markdown("### Trocar senha")
+    with st.form("senha_form"):
+        su = st.text_input("Username", value="").strip().lower()
+        sp = st.text_input("Nova senha", value="", type="password")
+        trocar = st.form_submit_button("Trocar senha")
+    if trocar:
+        try:
+            atualizar_senha(su, sp)
+            st.success("Senha alterada!")
+        except Exception as e:
+            st.error(str(e))
+
+
+# =========================
+# Página: Relatórios (ADMIN)
 # =========================
 else:
+    if role != "ADMIN":
+        st.error("Acesso negado. Apenas ADMIN pode acessar Relatórios.")
+        st.stop()
+
     st.subheader("📅 Relatórios")
 
     st.markdown("### Vendas por período (por cupom)")
