@@ -2,6 +2,7 @@
 # PDV Camargo Celulares — Web (Streamlit) | Completo: Caixa + Estoque + Histórico + Relatórios + Login
 # ✅ Multi-loja: 1 banco, dados separados por loja_id (estoque/vendas/caixa/usuários)
 # ✅ Admin: botão para ZERAR UMA LOJA (estoque + vendas + caixa) com segurança
+# ✅ Backup automático (SQLite): diário + retenção + backup seguro via SQLite backup API
 
 import os
 import sqlite3
@@ -41,6 +42,122 @@ try:
         os.makedirs(db_dir, exist_ok=True)
 except Exception:
     pass
+
+# =========================
+# BACKUP (Automático)
+# =========================
+# Onde salvar backups:
+# - Local: ./backups
+# - Render: se tiver Disk: /var/data/backups (recomendado via BACKUP_DIR)
+# - Render free: /tmp/backups (vai sumir ao reiniciar)
+DEFAULT_BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+if IS_RENDER:
+    BACKUP_DIR = os.getenv("BACKUP_DIR", "/tmp/backups")
+else:
+    BACKUP_DIR = os.getenv("BACKUP_DIR", DEFAULT_BACKUP_DIR)
+
+BACKUP_ENABLED = os.getenv("BACKUP_ENABLED", "1") == "1"
+BACKUP_ON_STARTUP = os.getenv("BACKUP_ON_STARTUP", "1") == "1"
+BACKUP_RETENTION_DAYS = int(os.getenv("BACKUP_RETENTION_DAYS", "14"))  # mantém últimos N dias
+
+def garantir_pasta_backup():
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+def _backup_filename(prefix: str = "pdv") -> str:
+    # 1 backup por dia (padrão): pdv_YYYY-MM-DD.db
+    # Se você quiser mais granular, troque por %H-%M também.
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    return f"{prefix}_{hoje}.db"
+
+def listar_backups(prefix: str = "pdv"):
+    garantir_pasta_backup()
+    pattern = os.path.join(BACKUP_DIR, f"{prefix}_*.db")
+    files = sorted(glob.glob(pattern), reverse=True)
+    return files
+
+def limpar_backups_antigos(prefix: str = "pdv"):
+    """
+    Apaga backups antigos mantendo apenas os dentro da janela de retenção.
+    """
+    if not BACKUP_ENABLED:
+        return
+    garantir_pasta_backup()
+
+    limite = datetime.now() - timedelta(days=BACKUP_RETENTION_DAYS)
+    for fp in listar_backups(prefix=prefix):
+        try:
+            base = os.path.basename(fp)  # pdv_YYYY-MM-DD.db
+            # tenta extrair data
+            parte = base.replace(f"{prefix}_", "").replace(".db", "")
+            dt = datetime.strptime(parte, "%Y-%m-%d")
+            if dt < limite:
+                os.remove(fp)
+        except Exception:
+            # se falhar parse, não apaga
+            pass
+
+def sqlite_backup_seguro(db_path: str, backup_path: str):
+    """
+    Faz backup seguro usando a API de backup do SQLite (melhor que copiar arquivo).
+    """
+    garantir_pasta_backup()
+    src = None
+    dst = None
+    try:
+        src = sqlite3.connect(db_path, check_same_thread=False)
+        src.execute("PRAGMA foreign_keys = ON;")
+        dst = sqlite3.connect(backup_path, check_same_thread=False)
+        src.backup(dst)
+        dst.commit()
+    finally:
+        try:
+            if dst:
+                dst.close()
+        except Exception:
+            pass
+        try:
+            if src:
+                src.close()
+        except Exception:
+            pass
+
+def criar_backup_agora(prefix: str = "pdv") -> str:
+    """
+    Cria um backup do banco atual e retorna o caminho do arquivo gerado.
+    """
+    if not BACKUP_ENABLED:
+        return ""
+
+    garantir_pasta_backup()
+    nome = _backup_filename(prefix=prefix)
+    backup_path = os.path.join(BACKUP_DIR, nome)
+
+    # evita refazer backup se já existe no dia
+    if os.path.exists(backup_path):
+        return backup_path
+
+    # Se DB ainda não existe, não cria
+    if not os.path.exists(DB_PATH):
+        return ""
+
+    sqlite_backup_seguro(DB_PATH, backup_path)
+    limpar_backups_antigos(prefix=prefix)
+    return backup_path
+
+def auto_backup_se_precisar(prefix: str = "pdv"):
+    """
+    Faz 1 backup por dia automaticamente quando o app inicia/recarrrega.
+    """
+    if not BACKUP_ENABLED or not BACKUP_ON_STARTUP:
+        return
+    try:
+        criar_backup_agora(prefix=prefix)
+    except Exception:
+        # nunca travar o app por backup
+        pass
 
 
 # =========================
@@ -166,6 +283,7 @@ def inicializar_banco():
     ✅ Inicializa banco já no padrão MULTI-LOJA.
     - Cria tabela lojas + cadastra 3 lojas (se vazio)
     - Migra tabelas antigas para receber loja_id (tudo vira loja_id=1)
+    - ✅ Auto-backup diário + retenção (se habilitado)
     """
     with conectar() as conn:
         cur = conn.cursor()
@@ -278,6 +396,8 @@ def inicializar_banco():
 
         conn.commit()
 
+    # ✅ Auto-backup diário (fora do with, pra não conflitar com a conexão ativa)
+    auto_backup_se_precisar(prefix="pdv")
 
 # =========================
 # Usuários / Auth (Login)
@@ -316,7 +436,7 @@ def inicializar_usuarios():
         # garante lojas (pra FK)
         garantir_lojas_padrao(conn)
 
-        # Se já existia tabela antiga, adiciona loja_id/ajusta roles sem quebrar
+        # Cria tabela (se não existir)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -332,12 +452,22 @@ def inicializar_usuarios():
         )
         """)
 
-        # Migração suave: se tabela antiga tinha role ADMIN/OPERADOR sem loja_id
-        if tabela_existe(conn, "usuarios") and not coluna_existe(conn, "usuarios", "loja_id"):
+        # ✅ Migração suave: se a tabela já existia e não tem loja_id
+        # Observação: como a tabela já existe, IF NOT EXISTS não altera schema,
+        # então precisamos checar e adicionar a coluna de verdade.
+        if not coluna_existe(conn, "usuarios", "loja_id"):
             add_coluna_se_nao_existe(conn, "usuarios", "loja_id INTEGER", "loja_id")
             # Operadores antigos viram loja 1 por padrão
-            conn.execute("UPDATE usuarios SET loja_id = 1 WHERE (role='OPERADOR') AND (loja_id IS NULL)")
+            try:
+                conn.execute("UPDATE usuarios SET loja_id = 1 WHERE (role='OPERADOR') AND (loja_id IS NULL)")
+            except Exception:
+                pass
             conn.commit()
+
+        # Índices úteis
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_role ON usuarios(role)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_loja ON usuarios(loja_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_ativo ON usuarios(ativo)")
 
         cur.execute("SELECT COUNT(*) FROM usuarios")
         total = int(cur.fetchone()[0] or 0)
@@ -504,11 +634,17 @@ def to_float(txt):
         return 0.0
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
-    return float(s)
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
 
 
 def brl(v: float) -> str:
-    return f"{float(v or 0.0):.2f}".replace(".", ",")
+    try:
+        return f"{float(v or 0.0):.2f}".replace(".", ",")
+    except Exception:
+        return "0,00"
 
 
 def map_forma_pagamento(rotulo_ui: str) -> str:
@@ -542,7 +678,6 @@ def get_loja_nome(loja_id: int) -> str:
         cur.execute("SELECT nome FROM lojas WHERE id = ?", (int(loja_id),))
         r = cur.fetchone()
     return str(r[0]) if r else f"Loja {loja_id}"
-
 
 # =========================
 # Produtos (Estoque) — MULTI-LOJA
@@ -593,15 +728,17 @@ def upsert_produto(loja_id: int, codigo: str, nome: str, preco_custo: float, pre
     nome = (nome or "").strip()
     if not codigo or not nome:
         raise ValueError("Código e nome são obrigatórios.")
-    if preco_venda <= 0:
+    if float(preco_venda or 0) <= 0:
         raise ValueError("Preço de venda deve ser > 0.")
-    if preco_custo < 0:
+    if float(preco_custo or 0) < 0:
         raise ValueError("Preço de custo deve ser >= 0.")
-    if quantidade < 0:
+    if int(quantidade or 0) < 0:
         raise ValueError("Quantidade deve ser >= 0.")
 
     with conectar() as conn:
         cur = conn.cursor()
+        # transação explícita reduz risco de conflito
+        cur.execute("BEGIN IMMEDIATE")
         cur.execute(
             """
             INSERT INTO produtos (loja_id, codigo, nome, preco_custo, preco_venda, quantidade)
@@ -612,7 +749,7 @@ def upsert_produto(loja_id: int, codigo: str, nome: str, preco_custo: float, pre
                 preco_venda=excluded.preco_venda,
                 quantidade=excluded.quantidade
             """,
-            (int(loja_id), codigo, nome, float(preco_custo), float(preco_venda), int(quantidade)),
+            (int(loja_id), codigo, nome, float(preco_custo or 0.0), float(preco_venda or 0.0), int(quantidade or 0)),
         )
         conn.commit()
 
@@ -623,13 +760,23 @@ def excluir_produto(loja_id: int, codigo: str):
         return
     with conectar() as conn:
         cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
         cur.execute("DELETE FROM produtos WHERE loja_id = ? AND codigo = ?", (int(loja_id), codigo))
         conn.commit()
 
 
 def baixar_estoque_por_codigo(loja_id: int, codigo: str, qtd: int):
+    codigo = (codigo or "").strip()
+    qtd = int(qtd or 0)
+    if not codigo:
+        raise RuntimeError("Código inválido.")
+    if qtd <= 0:
+        raise RuntimeError("Quantidade inválida (precisa ser > 0).")
+
     with conectar() as conn:
         cur = conn.cursor()
+        # BEGIN IMMEDIATE: garante lock de escrita, evitando corrida em multi-acesso
+        cur.execute("BEGIN IMMEDIATE")
         cur.execute(
             """
             UPDATE produtos
@@ -639,6 +786,7 @@ def baixar_estoque_por_codigo(loja_id: int, codigo: str, qtd: int):
             (int(qtd), int(loja_id), str(codigo), int(qtd)),
         )
         if cur.rowcount == 0:
+            conn.rollback()
             raise RuntimeError("Estoque insuficiente ou produto não encontrado.")
         conn.commit()
 
@@ -668,6 +816,7 @@ def abrir_caixa_db(loja_id: int, saldo_inicial: float, operador: str = "", obs: 
         raise RuntimeError(f"Já existe um caixa ABERTO nesta loja (Sessão #{atual[0]}). Feche antes de abrir outro.")
     with conectar() as conn:
         cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
         cur.execute(
             """
             INSERT INTO caixa_sessoes (loja_id, aberto_em, status, saldo_inicial, operador, obs_abertura)
@@ -734,6 +883,7 @@ def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: s
 
     with conectar() as conn:
         cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
         cur.execute(
             """
             UPDATE caixa_sessoes
@@ -757,6 +907,7 @@ def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: s
             ),
         )
         if cur.rowcount == 0:
+            conn.rollback()
             raise RuntimeError("Não foi possível fechar: sessão não está ABERTA (ou não existe) nesta loja.")
         conn.commit()
 
@@ -784,6 +935,7 @@ def registrar_venda_completa_db(
     recebido: float,
     troco: float,
     status: str = "FINALIZADA",
+    baixar_estoque: bool = False,  # ✅ opcional: modo transacional total
 ) -> int:
     with conectar() as conn:
         cur = conn.cursor()
@@ -796,6 +948,8 @@ def registrar_venda_completa_db(
         if not cur.fetchone():
             raise RuntimeError("Sessão de caixa inválida para esta loja (ou não está ABERTA).")
 
+        cur.execute("BEGIN IMMEDIATE")
+
         cur.execute(
             """
             INSERT INTO vendas_cabecalho
@@ -806,18 +960,21 @@ def registrar_venda_completa_db(
                 int(loja_id),
                 agora_iso(),
                 int(sessao_id),
-                float(subtotal),
-                float(desconto),
-                float(total),
+                float(subtotal or 0.0),
+                float(desconto or 0.0),
+                float(total or 0.0),
                 str(forma_pagamento),
-                float(recebido),
-                float(troco),
+                float(recebido or 0.0),
+                float(troco or 0.0),
                 str(status),
             ),
         )
         venda_id = int(cur.lastrowid)
 
         for it in itens:
+            codigo = str(it.get("codigo") or "").strip()
+            qtd = int(it.get("qtd") or 0)
+
             cur.execute(
                 """
                 INSERT INTO vendas_itens
@@ -827,14 +984,28 @@ def registrar_venda_completa_db(
                 (
                     int(loja_id),
                     venda_id,
-                    str(it.get("codigo") or ""),
+                    codigo,
                     str(it.get("produto") or ""),
                     float(it.get("preco_unit") or 0.0),
                     float(it.get("preco_custo") or 0.0),
-                    int(it.get("qtd") or 0),
+                    qtd,
                     float(it.get("total_item") or 0.0),
                 ),
             )
+
+            # ✅ opcional: baixa estoque dentro da mesma transação da venda
+            if baixar_estoque and codigo and qtd > 0:
+                cur.execute(
+                    """
+                    UPDATE produtos
+                    SET quantidade = quantidade - ?
+                    WHERE loja_id = ? AND codigo = ? AND quantidade >= ?
+                    """,
+                    (qtd, int(loja_id), codigo, qtd),
+                )
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    raise RuntimeError(f"Estoque insuficiente para o código {codigo}.")
 
         conn.commit()
         return venda_id
@@ -917,7 +1088,6 @@ def totais_por_dia_do_mes(loja_id: int, ano: int, mes: int):
     total_mes = float(df["total"].sum()) if not df.empty else 0.0
     return df, total_mes
 
-
 # =========================
 # Admin: Zerar dados de uma loja (estoque/vendas/caixa)
 # =========================
@@ -928,14 +1098,24 @@ def zerar_loja(loja_id: int):
     - vendas (cabecalho + itens)
     - caixa_sessoes
     Não mexe em usuários e não afeta outras lojas.
-    Segurança: não permite zerar se houver caixa ABERTO na loja.
+
+    Segurança:
+    - não permite zerar se houver caixa ABERTO na loja
+    - ✅ faz backup automático antes de zerar
     """
     # segurança: não zerar com caixa aberto
     if get_sessao_aberta(int(loja_id)):
         raise RuntimeError("Não é possível zerar: existe CAIXA ABERTO nesta loja. Feche o caixa antes.")
 
+    # ✅ backup antes de ação destrutiva
+    try:
+        criar_backup_agora(prefix="pdv_before_reset")
+    except Exception:
+        pass
+
     with conectar() as conn:
         cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
 
         # Itens primeiro (FK)
         cur.execute("DELETE FROM vendas_itens WHERE loja_id = ?", (int(loja_id),))
@@ -1038,7 +1218,15 @@ if "cart" not in st.session_state:
     st.session_state.cart = []
 
 st.title(APP_TITLE)
+
+# ✅ informações úteis (sem expor demais)
 st.caption(f"DB: {DB_PATH}")
+st.caption(f"Backups: {BACKUP_DIR} | Retenção: {BACKUP_RETENTION_DAYS} dias | Ativo: {('SIM' if BACKUP_ENABLED else 'NÃO')}")
+
+if IS_RENDER and (BACKUP_DIR or "").startswith("/tmp"):
+    st.warning("⚠️ Render Free: backups em /tmp podem SUMIR ao reiniciar. "
+               "Recomendado: usar Render Disk e setar BACKUP_DIR=/var/data/backups e DATABASE_PATH=/var/data/pdv.db")
+
 
 # =========================
 # Login (Sidebar)
@@ -1117,6 +1305,46 @@ else:
 
 st.sidebar.caption(f"Loja ativa ID: {loja_id_ativa}")
 
+
+# =========================
+# Admin — Backup manual (UI)
+# =========================
+if role == "ADMIN":
+    st.sidebar.divider()
+    st.sidebar.header("🧰 Admin: Backup")
+
+    if st.sidebar.button("📦 Gerar backup agora"):
+        try:
+            bp = criar_backup_agora(prefix="pdv_manual")
+            if bp:
+                st.sidebar.success(f"Backup criado: {os.path.basename(bp)}")
+            else:
+                st.sidebar.warning("Backup não criado (DB ainda não existe ou backup desabilitado).")
+        except Exception as e:
+            st.sidebar.error(f"Falha ao gerar backup: {e}")
+
+    # Lista backups e permite baixar
+    try:
+        backups = listar_backups(prefix="pdv_manual")[:10]
+        if backups:
+            st.sidebar.caption("Últimos backups manuais:")
+            for fp in backups:
+                try:
+                    nome = os.path.basename(fp)
+                    with open(fp, "rb") as f:
+                        st.sidebar.download_button(
+                            label=f"⬇️ {nome}",
+                            data=f.read(),
+                            file_name=nome,
+                            mime="application/octet-stream",
+                        )
+                except Exception:
+                    pass
+        else:
+            st.sidebar.caption("Nenhum backup manual ainda.")
+    except Exception:
+        st.sidebar.caption("Não foi possível listar backups.")
+
 # =========================
 # Navegação por perfil
 # =========================
@@ -1186,6 +1414,13 @@ else:
     if fechar:
         try:
             res = fechar_caixa_db(loja_id_ativa, int(sid), float(contado), obs_f)
+
+            # ✅ Backup no fechamento (ótimo para auditoria/restore)
+            try:
+                criar_backup_agora(prefix=f"pdv_close_loja{int(loja_id_ativa)}")
+            except Exception:
+                pass
+
             st.sidebar.success("Caixa fechado!")
             st.sidebar.write(f"Diferença: **R$ {brl(res['diferenca'])}**")
             st.rerun()
@@ -1307,17 +1542,15 @@ if pagina.startswith("🧾"):
             df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
             subtotal = float(df_cart["total_item"].sum()) if not df_cart.empty else 0.0
 
-            try:
-                desconto = to_float(desconto_txt)
-            except Exception:
+            desconto = to_float(desconto_txt)
+            if desconto < 0:
                 desconto = 0.0
+            if desconto > subtotal:
+                desconto = subtotal  # ✅ não deixa passar do subtotal
+
             total_liq = max(0.0, subtotal - float(desconto))
 
-            try:
-                recebido = to_float(recebido_txt) if forma_ui == "Dinheiro" else 0.0
-            except Exception:
-                recebido = 0.0
-
+            recebido = to_float(recebido_txt) if forma_ui == "Dinheiro" else 0.0
             troco = max(0.0, recebido - total_liq) if forma_ui == "Dinheiro" else 0.0
 
             st.write(f"Total: **R$ {brl(subtotal)}**")
@@ -1330,7 +1563,7 @@ if pagina.startswith("🧾"):
                 if not st.session_state.cart:
                     st.error("Carrinho vazio.")
                 else:
-                    # valida estoque (por loja)
+                    # valida estoque (por loja) antes de gravar
                     for it in st.session_state.cart:
                         prod = buscar_produto_por_codigo(loja_id_ativa, it["codigo"])
                         if not prod:
@@ -1340,25 +1573,13 @@ if pagina.startswith("🧾"):
                             st.error(f"Estoque insuficiente para {it['produto']}.")
                             st.stop()
 
-                    if desconto < 0:
-                        st.error("Desconto não pode ser negativo.")
-                        st.stop()
-
                     if forma_ui == "Dinheiro" and recebido < total_liq:
                         st.error("Valor recebido menor que o total com desconto.")
                         st.stop()
 
-                    # baixar estoque (por loja)
-                    try:
-                        for it in st.session_state.cart:
-                            baixar_estoque_por_codigo(loja_id_ativa, it["codigo"], int(it["qtd"]))
-                    except Exception as e:
-                        st.error(f"Erro ao baixar estoque: {e}")
-                        st.stop()
-
                     forma_db = map_forma_pagamento(forma_ui)
 
-                    # gravar venda (por loja)
+                    # ✅ MODO PROFISSIONAL: venda + itens + baixa estoque (tudo em 1 transação)
                     try:
                         venda_id = registrar_venda_completa_db(
                             loja_id=loja_id_ativa,
@@ -1371,6 +1592,7 @@ if pagina.startswith("🧾"):
                             recebido=float(recebido),
                             troco=float(troco),
                             status="FINALIZADA",
+                            baixar_estoque=True,
                         )
                     except Exception as e:
                         st.error(f"Erro ao registrar venda: {e}")
@@ -1521,6 +1743,12 @@ elif pagina.startswith("👤"):
         else:
             loja_id_apagar = int(loja_sel.split("—")[0].strip())
             try:
+                # ✅ backup dedicado antes de zerar
+                try:
+                    criar_backup_agora(prefix=f"pdv_before_reset_loja{int(loja_id_apagar)}")
+                except Exception:
+                    pass
+
                 zerar_loja(loja_id_apagar)
                 st.success("Loja zerada com sucesso!")
                 st.rerun()
