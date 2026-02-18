@@ -1,11 +1,15 @@
 # pdv_web_full.py
 # PDV Camargo Celulares — Web (Streamlit) | Completo: Caixa + Estoque + Histórico + Relatórios + Login
-# Compatível com o schema do seu pdv.py (produtos, caixa_sessoes, vendas_cabecalho, vendas_itens)
+# ✅ Multi-loja: 1 banco, dados separados por loja_id (estoque/vendas/caixa/usuários)
+# ✅ Admin: botão para ZERAR UMA LOJA (estoque + vendas + caixa) com segurança
 
 import os
 import sqlite3
 import secrets
 import hashlib
+import shutil
+import glob
+
 from datetime import datetime, timedelta, date
 
 import streamlit as st
@@ -40,6 +44,99 @@ except Exception:
 
 
 # =========================
+# Helpers (DB / Datas)
+# =========================
+def agora_iso() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def tabela_existe(conn: sqlite3.Connection, nome: str) -> bool:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (nome,),
+    )
+    return cur.fetchone() is not None
+
+
+def coluna_existe(conn: sqlite3.Connection, tabela: str, coluna: str) -> bool:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({tabela})")
+    cols = [r[1] for r in cur.fetchall()]  # r[1] = name
+    return coluna in cols
+
+
+def add_coluna_se_nao_existe(conn: sqlite3.Connection, tabela: str, coluna_sql: str, nome_coluna: str):
+    if not coluna_existe(conn, tabela, nome_coluna):
+        conn.execute(f"ALTER TABLE {tabela} ADD COLUMN {coluna_sql}")
+
+
+def garantir_lojas_padrao(conn: sqlite3.Connection):
+    """
+    Garante a tabela lojas e cadastra 3 lojas padrão se estiver vazia.
+    """
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS lojas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL,
+        ativa INTEGER NOT NULL DEFAULT 1
+    )
+    """)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM lojas")
+    total = int(cur.fetchone()[0] or 0)
+    if total == 0:
+        conn.execute("INSERT INTO lojas (nome) VALUES (?)", ("Loja 1",))
+        conn.execute("INSERT INTO lojas (nome) VALUES (?)", ("Loja 2",))
+        conn.execute("INSERT INTO lojas (nome) VALUES (?)", ("Loja 3",))
+    conn.commit()
+
+
+def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
+    """
+    Migra tabela produtos antiga (codigo UNIQUE global) para multi-loja (UNIQUE(loja_id, codigo)).
+    Faz rebuild seguro: cria produtos_new, copia, drop, rename.
+    """
+    if not tabela_existe(conn, "produtos"):
+        return
+
+    # Se já tem loja_id e UNIQUE por loja, não faz nada
+    if coluna_existe(conn, "produtos", "loja_id"):
+        return
+
+    cur = conn.cursor()
+    cur.execute("SELECT id, codigo, nome, preco_custo, preco_venda, quantidade FROM produtos")
+    rows = cur.fetchall()
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS produtos_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        loja_id INTEGER NOT NULL,
+        codigo TEXT NOT NULL,
+        nome TEXT NOT NULL,
+        preco_custo REAL NOT NULL DEFAULT 0,
+        preco_venda REAL NOT NULL,
+        quantidade INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(loja_id, codigo),
+        FOREIGN KEY (loja_id) REFERENCES lojas(id)
+    )
+    """)
+
+    for (pid, codigo, nome, pc, pv, qtd) in rows:
+        conn.execute(
+            """
+            INSERT INTO produtos_new (id, loja_id, codigo, nome, preco_custo, preco_venda, quantidade)
+            VALUES (?, 1, ?, ?, ?, ?, ?)
+            """,
+            (pid, (codigo or "").strip(), nome, float(pc or 0), float(pv or 0), int(qtd or 0)),
+        )
+
+    conn.execute("DROP TABLE produtos")
+    conn.execute("ALTER TABLE produtos_new RENAME TO produtos")
+    conn.commit()
+
+
+# =========================
 # Banco
 # =========================
 def conectar():
@@ -65,37 +162,56 @@ def conectar():
 
 
 def inicializar_banco():
-    # Mesma estrutura do pdv.py
+    """
+    ✅ Inicializa banco já no padrão MULTI-LOJA.
+    - Cria tabela lojas + cadastra 3 lojas (se vazio)
+    - Migra tabelas antigas para receber loja_id (tudo vira loja_id=1)
+    """
     with conectar() as conn:
         cur = conn.cursor()
 
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS produtos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            codigo TEXT UNIQUE,
-            nome TEXT NOT NULL,
-            preco_custo REAL NOT NULL DEFAULT 0,
-            preco_venda REAL NOT NULL,
-            quantidade INTEGER NOT NULL DEFAULT 0
-        )
-        """)
+        # 1) Lojas
+        garantir_lojas_padrao(conn)
 
-        # (LEGADO) mantém por compatibilidade
+        # 2) Produtos (rebuild se era legado)
+        #    (se já existia sem loja_id, migra para UNIQUE(loja_id, codigo))
+        if tabela_existe(conn, "produtos"):
+            migrar_produtos_para_multiloja(conn)
+        else:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS produtos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                loja_id INTEGER NOT NULL,
+                codigo TEXT NOT NULL,
+                nome TEXT NOT NULL,
+                preco_custo REAL NOT NULL DEFAULT 0,
+                preco_venda REAL NOT NULL,
+                quantidade INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(loja_id, codigo),
+                FOREIGN KEY (loja_id) REFERENCES lojas(id)
+            )
+            """)
+
+        # (LEGADO) vendas - mantém por compatibilidade, mas agora com loja_id
         cur.execute("""
         CREATE TABLE IF NOT EXISTS vendas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja_id INTEGER NOT NULL DEFAULT 1,
             datahora TEXT NOT NULL,
             codigo TEXT,
             produto TEXT NOT NULL,
             preco_unit REAL NOT NULL,
             qtd INTEGER NOT NULL,
-            total REAL NOT NULL
+            total REAL NOT NULL,
+            FOREIGN KEY (loja_id) REFERENCES lojas(id)
         )
         """)
 
+        # Caixa sessões (agora por loja)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS caixa_sessoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja_id INTEGER NOT NULL DEFAULT 1,
             aberto_em TEXT NOT NULL,
             fechado_em TEXT,
             status TEXT NOT NULL DEFAULT 'ABERTO',
@@ -105,13 +221,16 @@ def inicializar_banco():
             diferenca REAL NOT NULL DEFAULT 0,
             operador TEXT,
             obs_abertura TEXT,
-            obs_fechamento TEXT
+            obs_fechamento TEXT,
+            FOREIGN KEY (loja_id) REFERENCES lojas(id)
         )
         """)
 
+        # Vendas cabeçalho (agora por loja)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS vendas_cabecalho (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja_id INTEGER NOT NULL DEFAULT 1,
             datahora TEXT NOT NULL,
             sessao_id INTEGER,
             subtotal REAL NOT NULL DEFAULT 0,
@@ -121,13 +240,16 @@ def inicializar_banco():
             recebido REAL NOT NULL DEFAULT 0,
             troco REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'FINALIZADA',
+            FOREIGN KEY (loja_id) REFERENCES lojas(id),
             FOREIGN KEY (sessao_id) REFERENCES caixa_sessoes(id)
         )
         """)
 
+        # Vendas itens (agora por loja)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS vendas_itens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja_id INTEGER NOT NULL DEFAULT 1,
             venda_id INTEGER NOT NULL,
             codigo TEXT,
             produto TEXT NOT NULL,
@@ -135,13 +257,24 @@ def inicializar_banco():
             preco_custo REAL NOT NULL DEFAULT 0,
             qtd INTEGER NOT NULL,
             total_item REAL NOT NULL,
+            FOREIGN KEY (loja_id) REFERENCES lojas(id),
             FOREIGN KEY (venda_id) REFERENCES vendas_cabecalho(id) ON DELETE CASCADE
         )
         """)
 
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_cabecalho_datahora ON vendas_cabecalho(datahora)")
+        # 3) Migração: adiciona loja_id nas tabelas existentes (se ainda não tiver)
+        # Observação: produtos já foi tratado via rebuild acima.
+        for tabela in ["vendas", "caixa_sessoes", "vendas_cabecalho", "vendas_itens"]:
+            if tabela_existe(conn, tabela) and not coluna_existe(conn, tabela, "loja_id"):
+                add_coluna_se_nao_existe(conn, tabela, "loja_id INTEGER NOT NULL DEFAULT 1", "loja_id")
+                conn.execute(f"UPDATE {tabela} SET loja_id = 1 WHERE loja_id IS NULL")
+
+        # Índices (inclui loja)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_produtos_loja_codigo ON produtos(loja_id, codigo)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_cabecalho_loja_datahora ON vendas_cabecalho(loja_id, datahora)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_cabecalho_sessao ON vendas_cabecalho(sessao_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_itens_venda ON vendas_itens(venda_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_caixa_loja_status ON caixa_sessoes(loja_id, status)")
 
         conn.commit()
 
@@ -169,26 +302,42 @@ def verificar_senha(senha: str, salt_hex: str, hash_hex: str) -> bool:
 
 def inicializar_usuarios():
     """
-    Cria a tabela usuarios e, se não existir nenhum usuário,
+    ✅ Cria a tabela usuarios (multi-loja) e, se não existir nenhum usuário,
     cria um ADMIN inicial usando ADMIN_USER/ADMIN_PASS (Render env),
     ou padrão admin/admin123.
+
+    Roles:
+    - ADMIN: vê todas as lojas (loja_id pode ser NULL)
+    - DONO / OPERADOR: presos em uma loja (loja_id obrigatório)
     """
     with conectar() as conn:
         cur = conn.cursor()
 
+        # garante lojas (pra FK)
+        garantir_lojas_padrao(conn)
+
+        # Se já existia tabela antiga, adiciona loja_id/ajusta roles sem quebrar
         cur.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             nome TEXT,
-            role TEXT NOT NULL CHECK(role IN ('ADMIN','OPERADOR')),
+            role TEXT NOT NULL CHECK(role IN ('ADMIN','DONO','OPERADOR')),
+            loja_id INTEGER,
             pass_salt TEXT NOT NULL,
             pass_hash TEXT NOT NULL,
             ativo INTEGER NOT NULL DEFAULT 1,
-            criado_em TEXT NOT NULL
+            criado_em TEXT NOT NULL,
+            FOREIGN KEY (loja_id) REFERENCES lojas(id)
         )
         """)
-        conn.commit()
+
+        # Migração suave: se tabela antiga tinha role ADMIN/OPERADOR sem loja_id
+        if tabela_existe(conn, "usuarios") and not coluna_existe(conn, "usuarios", "loja_id"):
+            add_coluna_se_nao_existe(conn, "usuarios", "loja_id INTEGER", "loja_id")
+            # Operadores antigos viram loja 1 por padrão
+            conn.execute("UPDATE usuarios SET loja_id = 1 WHERE (role='OPERADOR') AND (loja_id IS NULL)")
+            conn.commit()
 
         cur.execute("SELECT COUNT(*) FROM usuarios")
         total = int(cur.fetchone()[0] or 0)
@@ -200,8 +349,8 @@ def inicializar_usuarios():
             salt, ph = gerar_hash_senha(admin_pass)
             cur.execute(
                 """
-                INSERT INTO usuarios (username, nome, role, pass_salt, pass_hash, ativo, criado_em)
-                VALUES (?, ?, 'ADMIN', ?, ?, 1, ?)
+                INSERT INTO usuarios (username, nome, role, loja_id, pass_salt, pass_hash, ativo, criado_em)
+                VALUES (?, ?, 'ADMIN', NULL, ?, ?, 1, ?)
                 """,
                 (admin_user, "Administrador", salt, ph, agora_iso()),
             )
@@ -216,23 +365,26 @@ def get_usuario(username: str):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, username, nome, role, pass_salt, pass_hash, ativo
+            SELECT id, username, nome, role, loja_id, pass_salt, pass_hash, ativo
             FROM usuarios
             WHERE username = ?
             """,
             (u,),
         )
         row = cur.fetchone()
+
     if not row:
         return None
+
     return {
         "id": int(row[0]),
         "username": str(row[1]),
         "nome": str(row[2] or ""),
         "role": str(row[3]),
-        "salt": str(row[4]),
-        "hash": str(row[5]),
-        "ativo": int(row[6] or 0),
+        "loja_id": (int(row[4]) if row[4] is not None else None),
+        "salt": str(row[5]),
+        "hash": str(row[6]),
+        "ativo": int(row[7] or 0),
     }
 
 
@@ -251,7 +403,7 @@ def listar_usuarios_df():
     with conectar() as conn:
         return pd.read_sql_query(
             """
-            SELECT username, nome, role, ativo, criado_em
+            SELECT username, nome, role, loja_id, ativo, criado_em
             FROM usuarios
             ORDER BY role DESC, username ASC
             """,
@@ -259,45 +411,64 @@ def listar_usuarios_df():
         )
 
 
-def criar_usuario(username: str, nome: str, role: str, senha: str, ativo: int = 1):
+# =========================
+# Usuários (CRUD)
+# =========================
+def criar_usuario(username: str, nome: str, role: str, senha: str, loja_id: int | None = None, ativo: int = 1):
     username = (username or "").strip().lower()
     nome = (nome or "").strip()
     role = (role or "").strip().upper()
 
-    if role not in ("ADMIN", "OPERADOR"):
-        raise ValueError("Perfil inválido. Use ADMIN ou OPERADOR.")
+    if role not in ("ADMIN", "DONO", "OPERADOR"):
+        raise ValueError("Perfil inválido. Use ADMIN, DONO ou OPERADOR.")
+
     if not username:
         raise ValueError("Username é obrigatório.")
     if len((senha or "").strip()) < 4:
         raise ValueError("Senha muito curta (mín. 4).")
+
+    # Regras multi-loja:
+    # - ADMIN: loja_id pode ser None (vê todas)
+    # - DONO/OPERADOR: loja_id obrigatório
+    if role in ("DONO", "OPERADOR") and not loja_id:
+        raise ValueError("Para DONO/OPERADOR é obrigatório informar loja_id.")
+    if role == "ADMIN":
+        loja_id = None
 
     salt, ph = gerar_hash_senha(senha)
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO usuarios (username, nome, role, pass_salt, pass_hash, ativo, criado_em)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO usuarios (username, nome, role, loja_id, pass_salt, pass_hash, ativo, criado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (username, nome, role, salt, ph, int(1 if ativo else 0), agora_iso()),
+            (username, nome, role, loja_id, salt, ph, int(1 if ativo else 0), agora_iso()),
         )
         conn.commit()
 
 
-def atualizar_usuario_role_ativo(username: str, role: str, ativo: int):
+def atualizar_usuario_role_ativo(username: str, role: str, ativo: int, loja_id: int | None = None):
     username = (username or "").strip().lower()
     role = (role or "").strip().upper()
-    if role not in ("ADMIN", "OPERADOR"):
+
+    if role not in ("ADMIN", "DONO", "OPERADOR"):
         raise ValueError("Perfil inválido.")
+
+    if role in ("DONO", "OPERADOR") and not loja_id:
+        raise ValueError("Para DONO/OPERADOR é obrigatório informar loja_id.")
+    if role == "ADMIN":
+        loja_id = None
+
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
             """
             UPDATE usuarios
-            SET role = ?, ativo = ?
+            SET role = ?, loja_id = ?, ativo = ?
             WHERE username = ?
             """,
-            (role, int(1 if ativo else 0), username),
+            (role, loja_id, int(1 if ativo else 0), username),
         )
         if cur.rowcount == 0:
             raise ValueError("Usuário não encontrado.")
@@ -340,10 +511,6 @@ def brl(v: float) -> str:
     return f"{float(v or 0.0):.2f}".replace(".", ",")
 
 
-def agora_iso():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
 def map_forma_pagamento(rotulo_ui: str) -> str:
     r = (rotulo_ui or "").strip().lower()
     if r == "pix":
@@ -358,22 +525,44 @@ def map_forma_pagamento(rotulo_ui: str) -> str:
 
 
 # =========================
-# Produtos (Estoque)
+# Lojas (helpers)
 # =========================
-def listar_produtos_df():
+def listar_lojas_df():
     with conectar() as conn:
         df = pd.read_sql_query(
-            """
-            SELECT codigo, nome, preco_custo, preco_venda, quantidade
-            FROM produtos
-            ORDER BY nome
-            """,
+            "SELECT id, nome, ativa FROM lojas ORDER BY id ASC",
             conn,
         )
     return df
 
 
-def buscar_produto_por_codigo(codigo: str):
+def get_loja_nome(loja_id: int) -> str:
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT nome FROM lojas WHERE id = ?", (int(loja_id),))
+        r = cur.fetchone()
+    return str(r[0]) if r else f"Loja {loja_id}"
+
+
+# =========================
+# Produtos (Estoque) — MULTI-LOJA
+# =========================
+def listar_produtos_df(loja_id: int):
+    with conectar() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT codigo, nome, preco_custo, preco_venda, quantidade
+            FROM produtos
+            WHERE loja_id = ?
+            ORDER BY nome
+            """,
+            conn,
+            params=(int(loja_id),),
+        )
+    return df
+
+
+def buscar_produto_por_codigo(loja_id: int, codigo: str):
     codigo = (codigo or "").strip()
     if not codigo:
         return None
@@ -383,9 +572,9 @@ def buscar_produto_por_codigo(codigo: str):
             """
             SELECT codigo, nome, preco_custo, preco_venda, quantidade
             FROM produtos
-            WHERE codigo = ?
+            WHERE loja_id = ? AND codigo = ?
             """,
-            (codigo,),
+            (int(loja_id), codigo),
         )
         row = cur.fetchone()
     if not row:
@@ -399,7 +588,7 @@ def buscar_produto_por_codigo(codigo: str):
     }
 
 
-def upsert_produto(codigo: str, nome: str, preco_custo: float, preco_venda: float, quantidade: int):
+def upsert_produto(loja_id: int, codigo: str, nome: str, preco_custo: float, preco_venda: float, quantidade: int):
     codigo = (codigo or "").strip()
     nome = (nome or "").strip()
     if not codigo or not nome:
@@ -415,39 +604,39 @@ def upsert_produto(codigo: str, nome: str, preco_custo: float, preco_venda: floa
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO produtos (codigo, nome, preco_custo, preco_venda, quantidade)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(codigo) DO UPDATE SET
+            INSERT INTO produtos (loja_id, codigo, nome, preco_custo, preco_venda, quantidade)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(loja_id, codigo) DO UPDATE SET
                 nome=excluded.nome,
                 preco_custo=excluded.preco_custo,
                 preco_venda=excluded.preco_venda,
                 quantidade=excluded.quantidade
             """,
-            (codigo, nome, float(preco_custo), float(preco_venda), int(quantidade)),
+            (int(loja_id), codigo, nome, float(preco_custo), float(preco_venda), int(quantidade)),
         )
         conn.commit()
 
 
-def excluir_produto(codigo: str):
+def excluir_produto(loja_id: int, codigo: str):
     codigo = (codigo or "").strip()
     if not codigo:
         return
     with conectar() as conn:
         cur = conn.cursor()
-        cur.execute("DELETE FROM produtos WHERE codigo = ?", (codigo,))
+        cur.execute("DELETE FROM produtos WHERE loja_id = ? AND codigo = ?", (int(loja_id), codigo))
         conn.commit()
 
 
-def baixar_estoque_por_codigo(codigo: str, qtd: int):
+def baixar_estoque_por_codigo(loja_id: int, codigo: str, qtd: int):
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
             """
             UPDATE produtos
             SET quantidade = quantidade - ?
-            WHERE codigo = ? AND quantidade >= ?
+            WHERE loja_id = ? AND codigo = ? AND quantidade >= ?
             """,
-            (int(qtd), str(codigo), int(qtd)),
+            (int(qtd), int(loja_id), str(codigo), int(qtd)),
         )
         if cur.rowcount == 0:
             raise RuntimeError("Estoque insuficiente ou produto não encontrado.")
@@ -455,86 +644,90 @@ def baixar_estoque_por_codigo(codigo: str, qtd: int):
 
 
 # =========================
-# Caixa (Abertura/Fechamento)
+# Caixa (Abertura/Fechamento) — MULTI-LOJA
 # =========================
-def get_sessao_aberta():
+def get_sessao_aberta(loja_id: int):
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
             """
             SELECT id, aberto_em, saldo_inicial, operador
             FROM caixa_sessoes
-            WHERE status='ABERTO'
+            WHERE loja_id = ? AND status='ABERTO'
             ORDER BY id DESC
             LIMIT 1
-            """
+            """,
+            (int(loja_id),),
         )
         return cur.fetchone()
 
 
-def abrir_caixa_db(saldo_inicial: float, operador: str = "", obs: str = "") -> int:
-    atual = get_sessao_aberta()
+def abrir_caixa_db(loja_id: int, saldo_inicial: float, operador: str = "", obs: str = "") -> int:
+    atual = get_sessao_aberta(loja_id)
     if atual:
-        raise RuntimeError(f"Já existe um caixa ABERTO (Sessão #{atual[0]}). Feche antes de abrir outro.")
+        raise RuntimeError(f"Já existe um caixa ABERTO nesta loja (Sessão #{atual[0]}). Feche antes de abrir outro.")
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO caixa_sessoes (aberto_em, status, saldo_inicial, operador, obs_abertura)
-            VALUES (?, 'ABERTO', ?, ?, ?)
+            INSERT INTO caixa_sessoes (loja_id, aberto_em, status, saldo_inicial, operador, obs_abertura)
+            VALUES (?, ?, 'ABERTO', ?, ?, ?)
             """,
-            (agora_iso(), float(saldo_inicial or 0.0), (operador or "").strip(), (obs or "").strip()),
+            (int(loja_id), agora_iso(), float(saldo_inicial or 0.0), (operador or "").strip(), (obs or "").strip()),
         )
         conn.commit()
         return int(cur.lastrowid)
 
 
-def totais_sessao(sessao_id: int):
+def totais_sessao(loja_id: int, sessao_id: int):
     with conectar() as conn:
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT COALESCE(SUM(total), 0)
-            FROM vendas_cabecalho
-            WHERE sessao_id = ? AND status='FINALIZADA'
-            """,
-            (int(sessao_id),),
-        )
-        total_vendas = float(cur.fetchone()[0] or 0.0)
 
+        # garante que sessão pertence à loja
         cur.execute(
             """
             SELECT saldo_inicial, aberto_em
             FROM caixa_sessoes
-            WHERE id = ?
+            WHERE id = ? AND loja_id = ?
             """,
-            (int(sessao_id),),
+            (int(sessao_id), int(loja_id)),
         )
         row = cur.fetchone()
         saldo_inicial = float(row[0] or 0.0) if row else 0.0
         aberto_em = row[1] if row else ""
+
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(total), 0)
+            FROM vendas_cabecalho
+            WHERE loja_id = ? AND sessao_id = ? AND status='FINALIZADA'
+            """,
+            (int(loja_id), int(sessao_id)),
+        )
+        total_vendas = float(cur.fetchone()[0] or 0.0)
+
         saldo_final_sistema = saldo_inicial + total_vendas
         return saldo_inicial, total_vendas, saldo_final_sistema, aberto_em
 
 
-def relatorio_pagamentos_sessao(sessao_id: int):
+def relatorio_pagamentos_sessao(loja_id: int, sessao_id: int):
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
             """
             SELECT forma_pagamento, COALESCE(SUM(total), 0)
             FROM vendas_cabecalho
-            WHERE sessao_id = ? AND status='FINALIZADA'
+            WHERE loja_id = ? AND sessao_id = ? AND status='FINALIZADA'
             GROUP BY forma_pagamento
             ORDER BY forma_pagamento
             """,
-            (int(sessao_id),),
+            (int(loja_id), int(sessao_id)),
         )
         return [(str(fp), float(t or 0.0)) for fp, t in cur.fetchall()]
 
 
-def fechar_caixa_db(sessao_id: int, saldo_informado: float, obs: str = ""):
-    saldo_inicial, total_vendas, saldo_final_sistema, _ = totais_sessao(sessao_id)
+def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: str = ""):
+    saldo_inicial, total_vendas, saldo_final_sistema, _ = totais_sessao(loja_id, sessao_id)
     saldo_informado = float(saldo_informado or 0.0)
     diferenca = saldo_informado - saldo_final_sistema
     agora = agora_iso()
@@ -551,13 +744,20 @@ def fechar_caixa_db(sessao_id: int, saldo_informado: float, obs: str = ""):
                 saldo_final_informado = ?,
                 diferenca = ?,
                 obs_fechamento = ?
-            WHERE id = ? AND status='ABERTO'
+            WHERE id = ? AND loja_id = ? AND status='ABERTO'
             """,
-            (agora, float(saldo_final_sistema), float(saldo_informado), float(diferenca),
-             (obs or "").strip(), int(sessao_id)),
+            (
+                agora,
+                float(saldo_final_sistema),
+                float(saldo_informado),
+                float(diferenca),
+                (obs or "").strip(),
+                int(sessao_id),
+                int(loja_id),
+            ),
         )
         if cur.rowcount == 0:
-            raise RuntimeError("Não foi possível fechar: sessão não está ABERTA (ou não existe).")
+            raise RuntimeError("Não foi possível fechar: sessão não está ABERTA (ou não existe) nesta loja.")
         conn.commit()
 
     return {
@@ -571,9 +771,10 @@ def fechar_caixa_db(sessao_id: int, saldo_informado: float, obs: str = ""):
 
 
 # =========================
-# Vendas
+# Vendas — MULTI-LOJA
 # =========================
 def registrar_venda_completa_db(
+    loja_id: int,
     sessao_id: int,
     itens: list,
     forma_pagamento: str,
@@ -586,13 +787,23 @@ def registrar_venda_completa_db(
 ) -> int:
     with conectar() as conn:
         cur = conn.cursor()
+
+        # segurança: sessão pertence à loja e está aberta
+        cur.execute(
+            "SELECT id FROM caixa_sessoes WHERE id = ? AND loja_id = ? AND status='ABERTO'",
+            (int(sessao_id), int(loja_id)),
+        )
+        if not cur.fetchone():
+            raise RuntimeError("Sessão de caixa inválida para esta loja (ou não está ABERTA).")
+
         cur.execute(
             """
             INSERT INTO vendas_cabecalho
-                (datahora, sessao_id, subtotal, desconto, total, forma_pagamento, recebido, troco, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (loja_id, datahora, sessao_id, subtotal, desconto, total, forma_pagamento, recebido, troco, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                int(loja_id),
                 agora_iso(),
                 int(sessao_id),
                 float(subtotal),
@@ -610,10 +821,11 @@ def registrar_venda_completa_db(
             cur.execute(
                 """
                 INSERT INTO vendas_itens
-                    (venda_id, codigo, produto, preco_unit, preco_custo, qtd, total_item)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (loja_id, venda_id, codigo, produto, preco_unit, preco_custo, qtd, total_item)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    int(loja_id),
                     venda_id,
                     str(it.get("codigo") or ""),
                     str(it.get("produto") or ""),
@@ -628,7 +840,7 @@ def registrar_venda_completa_db(
         return venda_id
 
 
-def listar_vendas_itens_df(filtro_produto: str = ""):
+def listar_vendas_itens_df(loja_id: int, filtro_produto: str = ""):
     filtro = (filtro_produto or "").strip().lower()
     with conectar() as conn:
         df = pd.read_sql_query(
@@ -642,17 +854,18 @@ def listar_vendas_itens_df(filtro_produto: str = ""):
                 i.total_item as total_item
             FROM vendas_itens i
             JOIN vendas_cabecalho c ON c.id = i.venda_id
-            WHERE c.status='FINALIZADA'
+            WHERE c.loja_id = ? AND i.loja_id = ? AND c.status='FINALIZADA'
             ORDER BY c.id DESC, i.id ASC
             """,
             conn,
+            params=(int(loja_id), int(loja_id)),
         )
     if filtro and not df.empty:
         df = df[df["produto"].astype(str).str.lower().str.contains(filtro, na=False)]
     return df
 
 
-def listar_vendas_por_periodo_df(data_ini: datetime, data_fim: datetime):
+def listar_vendas_por_periodo_df(loja_id: int, data_ini: datetime, data_fim: datetime):
     ini = data_ini.strftime("%Y-%m-%d %H:%M:%S")
     fim = data_fim.strftime("%Y-%m-%d %H:%M:%S")
     with conectar() as conn:
@@ -664,19 +877,20 @@ def listar_vendas_por_periodo_df(data_ini: datetime, data_fim: datetime):
                 COALESCE(SUM(i.qtd), 0) as itens,
                 c.total as total
             FROM vendas_cabecalho c
-            LEFT JOIN vendas_itens i ON i.venda_id = c.id
-            WHERE c.status='FINALIZADA'
+            LEFT JOIN vendas_itens i ON i.venda_id = c.id AND i.loja_id = c.loja_id
+            WHERE c.loja_id = ?
+              AND c.status='FINALIZADA'
               AND datetime(c.datahora) BETWEEN datetime(?) AND datetime(?)
             GROUP BY c.id, c.datahora, c.total
             ORDER BY datetime(c.datahora) DESC
             """,
             conn,
-            params=(ini, fim),
+            params=(int(loja_id), ini, fim),
         )
     return df
 
 
-def totais_por_dia_do_mes(ano: int, mes: int):
+def totais_por_dia_do_mes(loja_id: int, ano: int, mes: int):
     primeiro = datetime(ano, mes, 1, 0, 0, 0)
     if mes == 12:
         prox = datetime(ano + 1, 1, 1, 0, 0, 0)
@@ -691,20 +905,56 @@ def totais_por_dia_do_mes(ano: int, mes: int):
             """
             SELECT date(datahora) as dia, COALESCE(SUM(total), 0) as total
             FROM vendas_cabecalho
-            WHERE status='FINALIZADA'
+            WHERE loja_id = ?
+              AND status='FINALIZADA'
               AND datetime(datahora) BETWEEN datetime(?) AND datetime(?)
             GROUP BY date(datahora)
             ORDER BY date(datahora)
             """,
             conn,
-            params=(ini, fim),
+            params=(int(loja_id), ini, fim),
         )
     total_mes = float(df["total"].sum()) if not df.empty else 0.0
     return df, total_mes
 
 
 # =========================
+# Admin: Zerar dados de uma loja (estoque/vendas/caixa)
+# =========================
+def zerar_loja(loja_id: int):
+    """
+    Zera APENAS os dados da loja informada:
+    - produtos (estoque)
+    - vendas (cabecalho + itens)
+    - caixa_sessoes
+    Não mexe em usuários e não afeta outras lojas.
+    Segurança: não permite zerar se houver caixa ABERTO na loja.
+    """
+    # segurança: não zerar com caixa aberto
+    if get_sessao_aberta(int(loja_id)):
+        raise RuntimeError("Não é possível zerar: existe CAIXA ABERTO nesta loja. Feche o caixa antes.")
+
+    with conectar() as conn:
+        cur = conn.cursor()
+
+        # Itens primeiro (FK)
+        cur.execute("DELETE FROM vendas_itens WHERE loja_id = ?", (int(loja_id),))
+        cur.execute("DELETE FROM vendas_cabecalho WHERE loja_id = ?", (int(loja_id),))
+        cur.execute("DELETE FROM caixa_sessoes WHERE loja_id = ?", (int(loja_id),))
+        cur.execute("DELETE FROM produtos WHERE loja_id = ?", (int(loja_id),))
+
+        # Tabela "vendas" legada (se existir)
+        try:
+            cur.execute("DELETE FROM vendas WHERE loja_id = ?", (int(loja_id),))
+        except Exception:
+            pass
+
+        conn.commit()
+
+
+# =========================
 # Cupom (TXT para download)
+# (mantive igual; depois, se quiser, eu puxo os dados reais da loja do banco)
 # =========================
 def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float, recebido: float, troco: float):
     largura = 40
@@ -815,6 +1065,7 @@ if not auth:
                 "username": user["username"],
                 "nome": user["nome"],
                 "role": user["role"],
+                "loja_id": user.get("loja_id"),  # ✅ importante pro multi-loja
             }
             st.rerun()
 
@@ -824,25 +1075,71 @@ else:
     st.sidebar.success(f"Logado: {auth['username']} ({auth['role']})")
     if st.sidebar.button("Sair"):
         st.session_state.auth = None
+        # limpa loja selecionada ao sair
+        if "loja_id" in st.session_state:
+            del st.session_state["loja_id"]
         st.rerun()
 
-# Navegação por perfil
+# =========================
+# Seleção / Fixo de Loja
+# =========================
 role = st.session_state.auth["role"]
+user_loja_id = st.session_state.auth.get("loja_id")
 
-paginas = ["🧾 Caixa (PDV)", "📈 Histórico"]
+st.sidebar.divider()
+st.sidebar.header("🏪 Loja")
+
+df_lojas = listar_lojas_df()
+lojas_ativas = df_lojas[df_lojas["ativa"] == 1] if not df_lojas.empty else df_lojas
+
+if "loja_id" not in st.session_state:
+    # define default
+    if role == "ADMIN":
+        st.session_state.loja_id = int(lojas_ativas.iloc[0]["id"]) if not lojas_ativas.empty else 1
+    else:
+        # DONO/OPERADOR: loja fixa
+        st.session_state.loja_id = int(user_loja_id or 1)
+
 if role == "ADMIN":
+    opcoes = [f"{int(r.id)} — {r.nome}" for r in lojas_ativas.itertuples(index=False)]
+    ids = [int(r.id) for r in lojas_ativas.itertuples(index=False)]
+    try:
+        idx = ids.index(int(st.session_state.loja_id))
+    except Exception:
+        idx = 0
+
+    escolha = st.sidebar.selectbox("Selecionar loja", opcoes, index=idx)
+    loja_id_ativa = int(escolha.split("—")[0].strip())
+    st.session_state.loja_id = loja_id_ativa
+else:
+    loja_id_ativa = int(st.session_state.loja_id)
+    st.sidebar.info(f"Loja fixa: **{get_loja_nome(loja_id_ativa)}**")
+
+st.sidebar.caption(f"Loja ativa ID: {loja_id_ativa}")
+
+# =========================
+# Navegação por perfil
+# =========================
+paginas = ["🧾 Caixa (PDV)", "📈 Histórico"]
+
+# ✅ Agora OPERADOR também acessa Estoque e Relatórios
+if role in ("ADMIN", "DONO", "OPERADOR"):
     paginas.insert(1, "📦 Estoque")
     paginas.append("📅 Relatórios")
+
+# ✅ Só ADMIN gerencia usuários
+if role == "ADMIN":
     paginas.append("👤 Usuários (Admin)")
 
 pagina = st.sidebar.radio("Navegação", paginas, index=0)
 
 # =========================
-# Caixa (sidebar abrir/fechar sempre visível)
+# Caixa (sidebar abrir/fechar sempre visível) — MULTI-LOJA
 # =========================
 st.sidebar.divider()
 st.sidebar.header("Caixa (Abertura/Fechamento)")
-sess = get_sessao_aberta()
+
+sess = get_sessao_aberta(loja_id_ativa)
 
 if not sess:
     st.sidebar.error("CAIXA FECHADO")
@@ -853,7 +1150,7 @@ if not sess:
         ok = st.form_submit_button("🔓 Abrir Caixa")
     if ok:
         try:
-            sid = abrir_caixa_db(saldo_ini, operador, obs)
+            sid = abrir_caixa_db(loja_id_ativa, saldo_ini, operador, obs)
             st.sidebar.success(f"Caixa aberto! Sessão #{sid}")
             st.rerun()
         except Exception as e:
@@ -866,11 +1163,11 @@ else:
         st.sidebar.caption(f"Operador: {operador}")
     st.sidebar.caption(f"Saldo inicial: R$ {brl(saldo_ini)}")
 
-    saldo_inicial, total_vendas, saldo_final_sistema, _ = totais_sessao(int(sid))
+    saldo_inicial, total_vendas, saldo_final_sistema, _ = totais_sessao(loja_id_ativa, int(sid))
     st.sidebar.write(f"Vendas (sistema): **R$ {brl(total_vendas)}**")
     st.sidebar.write(f"Final (sistema): **R$ {brl(saldo_final_sistema)}**")
 
-    rel = relatorio_pagamentos_sessao(int(sid))
+    rel = relatorio_pagamentos_sessao(loja_id_ativa, int(sid))
     if rel:
         df_rel = pd.DataFrame(rel, columns=["Forma", "Total"])
         df_rel["Total"] = df_rel["Total"].map(lambda x: f"R$ {brl(x)}")
@@ -888,7 +1185,7 @@ else:
         fechar = st.form_submit_button("🔒 Fechar Caixa")
     if fechar:
         try:
-            res = fechar_caixa_db(int(sid), float(contado), obs_f)
+            res = fechar_caixa_db(loja_id_ativa, int(sid), float(contado), obs_f)
             st.sidebar.success("Caixa fechado!")
             st.sidebar.write(f"Diferença: **R$ {brl(res['diferenca'])}**")
             st.rerun()
@@ -903,7 +1200,8 @@ if pagina.startswith("🧾"):
     col1, col2 = st.columns([2.2, 1], gap="large")
 
     with col1:
-        st.subheader("Lançar item (por código)")
+        st.subheader(f"🧾 Caixa — {get_loja_nome(loja_id_ativa)}")
+        st.caption("Lançar item por código")
 
         if not sess:
             st.info("Abra o caixa na barra lateral para vender.")
@@ -913,9 +1211,9 @@ if pagina.startswith("🧾"):
                 qtd = st.number_input("Quantidade", min_value=1, step=1, value=1)
                 add = st.form_submit_button("Adicionar")
             if add:
-                prod = buscar_produto_por_codigo(codigo)
+                prod = buscar_produto_por_codigo(loja_id_ativa, codigo)
                 if not prod:
-                    st.error("Produto não encontrado pelo código.")
+                    st.error("Produto não encontrado pelo código (nesta loja).")
                 else:
                     qtd = int(qtd)
                     if qtd > prod["quantidade"]:
@@ -1032,11 +1330,11 @@ if pagina.startswith("🧾"):
                 if not st.session_state.cart:
                     st.error("Carrinho vazio.")
                 else:
-                    # valida estoque
+                    # valida estoque (por loja)
                     for it in st.session_state.cart:
-                        prod = buscar_produto_por_codigo(it["codigo"])
+                        prod = buscar_produto_por_codigo(loja_id_ativa, it["codigo"])
                         if not prod:
-                            st.error(f"Produto {it['codigo']} não encontrado no estoque.")
+                            st.error(f"Produto {it['codigo']} não encontrado no estoque desta loja.")
                             st.stop()
                         if int(it["qtd"]) > int(prod["quantidade"]):
                             st.error(f"Estoque insuficiente para {it['produto']}.")
@@ -1050,19 +1348,20 @@ if pagina.startswith("🧾"):
                         st.error("Valor recebido menor que o total com desconto.")
                         st.stop()
 
-                    # baixar estoque
+                    # baixar estoque (por loja)
                     try:
                         for it in st.session_state.cart:
-                            baixar_estoque_por_codigo(it["codigo"], int(it["qtd"]))
+                            baixar_estoque_por_codigo(loja_id_ativa, it["codigo"], int(it["qtd"]))
                     except Exception as e:
                         st.error(f"Erro ao baixar estoque: {e}")
                         st.stop()
 
                     forma_db = map_forma_pagamento(forma_ui)
 
-                    # gravar venda
+                    # gravar venda (por loja)
                     try:
                         venda_id = registrar_venda_completa_db(
+                            loja_id=loja_id_ativa,
                             sessao_id=int(sid),
                             itens=st.session_state.cart,
                             forma_pagamento=forma_db,
@@ -1100,14 +1399,14 @@ if pagina.startswith("🧾"):
 
 
 # =========================
-# Página: Estoque (ADMIN)
+# Página: Estoque (ADMIN/DONO/OPERADOR)
 # =========================
 elif pagina.startswith("📦"):
-    if role != "ADMIN":
-        st.error("Acesso negado. Apenas ADMIN pode acessar o Estoque.")
+    if role not in ("ADMIN", "DONO", "OPERADOR"):
+        st.error("Acesso negado. Apenas ADMIN, DONO ou OPERADOR pode acessar o Estoque.")
         st.stop()
 
-    st.subheader("📦 Estoque — Produtos")
+    st.subheader(f"📦 Estoque — {get_loja_nome(loja_id_ativa)}")
 
     cA, cB = st.columns([1, 1], gap="large")
 
@@ -1134,7 +1433,7 @@ elif pagina.startswith("📦"):
                 else:
                     venda = to_float(venda_txt)
 
-                upsert_produto(codigo, nome, float(custo), float(venda), int(qtd))
+                upsert_produto(loja_id_ativa, codigo, nome, float(custo), float(venda), int(qtd))
                 st.success("Produto salvo!")
                 st.rerun()
             except Exception as e:
@@ -1146,17 +1445,17 @@ elif pagina.startswith("📦"):
             if not cod_del.strip():
                 st.warning("Informe um código.")
             else:
-                excluir_produto(cod_del.strip())
-                st.success("Excluído (se existia).")
+                excluir_produto(loja_id_ativa, cod_del.strip())
+                st.success("Excluído (se existia) nesta loja.")
                 st.rerun()
 
     with cB:
         st.markdown("### Buscar por código")
         cod_busca = st.text_input("Código", value="", key="busca_code")
         if st.button("🔎 Buscar"):
-            prod = buscar_produto_por_codigo(cod_busca)
+            prod = buscar_produto_por_codigo(loja_id_ativa, cod_busca)
             if not prod:
-                st.warning("Não encontrado.")
+                st.warning("Não encontrado nesta loja.")
             else:
                 st.info(
                     f"**{prod['nome']}**\n\n"
@@ -1164,10 +1463,10 @@ elif pagina.startswith("📦"):
                 )
 
     st.divider()
-    st.markdown("### Lista de produtos")
-    df = listar_produtos_df()
+    st.markdown("### Lista de produtos (desta loja)")
+    df = listar_produtos_df(loja_id_ativa)
     if df.empty:
-        st.info("Sem produtos cadastrados.")
+        st.info("Sem produtos cadastrados nesta loja.")
     else:
         df_show = df.copy()
         df_show["preco_custo"] = df_show["preco_custo"].map(lambda x: f"R$ {brl(x)}")
@@ -1179,13 +1478,13 @@ elif pagina.startswith("📦"):
 # Página: Histórico
 # =========================
 elif pagina.startswith("📈"):
-    st.subheader("📈 Histórico de Vendas (itens)")
+    st.subheader(f"📈 Histórico de Vendas (itens) — {get_loja_nome(loja_id_ativa)}")
 
     filtro = st.text_input("Filtrar por produto (contém)", value="")
-    df = listar_vendas_itens_df(filtro_produto=filtro)
+    df = listar_vendas_itens_df(loja_id_ativa, filtro_produto=filtro)
 
     if df.empty:
-        st.info("Sem vendas (ou filtro sem resultados).")
+        st.info("Sem vendas (ou filtro sem resultados) nesta loja.")
     else:
         total = float(df["total_item"].sum())
         st.metric("Total vendido (itens filtrados)", f"R$ {brl(total)}")
@@ -1206,17 +1505,50 @@ elif pagina.startswith("👤"):
 
     st.subheader("👤 Usuários (Admin)")
 
+    # ✅ BOTÃO: ZERAR LOJA (estoque/vendas/caixa)
+    st.divider()
+    st.markdown("### ⚠️ Manutenção (Admin) — Zerar dados de uma loja")
+    with st.form("zerar_loja_form"):
+        lojas_df = listar_lojas_df()
+        opcoes = [f"{int(r.id)} — {r.nome}" for r in lojas_df.itertuples(index=False)]
+        loja_sel = st.selectbox("Selecionar loja para ZERAR", opcoes, index=0)
+        confirmar = st.checkbox("Confirmo que quero apagar TODOS os dados da loja selecionada")
+        apagar = st.form_submit_button("🔥 ZERAR LOJA")
+
+    if apagar:
+        if not confirmar:
+            st.error("Você precisa confirmar antes de apagar.")
+        else:
+            loja_id_apagar = int(loja_sel.split("—")[0].strip())
+            try:
+                zerar_loja(loja_id_apagar)
+                st.success("Loja zerada com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    st.divider()
     st.markdown("### Criar novo usuário")
     with st.form("criar_usuario_form"):
         nu = st.text_input("Username (ex: joao)", value="").strip().lower()
         nn = st.text_input("Nome", value="")
-        nr = st.selectbox("Perfil", ["OPERADOR", "ADMIN"], index=0)
+        nr = st.selectbox("Perfil", ["OPERADOR", "DONO", "ADMIN"], index=0)
+
+        # loja para dono/operador
+        lojas_ativas2 = listar_lojas_df()
+        lojas_ativas2 = lojas_ativas2[lojas_ativas2["ativa"] == 1] if not lojas_ativas2.empty else lojas_ativas2
+        opcoes_lojas = [f"{int(r.id)} — {r.nome}" for r in lojas_ativas2.itertuples(index=False)]
+        loja_sel2 = st.selectbox("Loja do usuário (Dono/Operador)", opcoes_lojas, index=0)
+        loja_sel_id = int(loja_sel2.split("—")[0].strip())
+
         ns = st.text_input("Senha", value="", type="password")
         nativo = st.checkbox("Ativo", value=True)
         criar = st.form_submit_button("Criar")
+
     if criar:
         try:
-            criar_usuario(nu, nn, nr, ns, 1 if nativo else 0)
+            loja_param = None if nr == "ADMIN" else loja_sel_id
+            criar_usuario(nu, nn, nr, ns, loja_id=loja_param, ativo=1 if nativo else 0)
             st.success("Usuário criado!")
             st.rerun()
         except Exception as e:
@@ -1227,15 +1559,24 @@ elif pagina.startswith("👤"):
     dfu = listar_usuarios_df()
     st.dataframe(dfu, use_container_width=True, hide_index=True)
 
-    st.markdown("### Alterar perfil / ativar/desativar")
+    st.markdown("### Alterar perfil / loja / ativar-desativar")
     with st.form("editar_usuario_form"):
         eu = st.text_input("Username para editar", value="").strip().lower()
-        er = st.selectbox("Novo perfil", ["OPERADOR", "ADMIN"], index=0)
+        er = st.selectbox("Novo perfil", ["OPERADOR", "DONO", "ADMIN"], index=0)
+
+        lojas_ativas3 = listar_lojas_df()
+        lojas_ativas3 = lojas_ativas3[lojas_ativas3["ativa"] == 1] if not lojas_ativas3.empty else lojas_ativas3
+        opcoes_lojas3 = [f"{int(r.id)} — {r.nome}" for r in lojas_ativas3.itertuples(index=False)]
+        loja_edit = st.selectbox("Nova loja (Dono/Operador)", opcoes_lojas3, index=0)
+        loja_edit_id = int(loja_edit.split("—")[0].strip())
+
         ea = st.checkbox("Ativo", value=True)
         salvar = st.form_submit_button("Salvar alterações")
+
     if salvar:
         try:
-            atualizar_usuario_role_ativo(eu, er, 1 if ea else 0)
+            loja_param = None if er == "ADMIN" else loja_edit_id
+            atualizar_usuario_role_ativo(eu, er, 1 if ea else 0, loja_id=loja_param)
             st.success("Atualizado!")
             st.rerun()
         except Exception as e:
@@ -1255,14 +1596,14 @@ elif pagina.startswith("👤"):
 
 
 # =========================
-# Página: Relatórios (ADMIN)
+# Página: Relatórios (ADMIN/DONO/OPERADOR)
 # =========================
 else:
-    if role != "ADMIN":
-        st.error("Acesso negado. Apenas ADMIN pode acessar Relatórios.")
+    if role not in ("ADMIN", "DONO", "OPERADOR"):
+        st.error("Acesso negado. Apenas ADMIN, DONO ou OPERADOR pode acessar Relatórios.")
         st.stop()
 
-    st.subheader("📅 Relatórios")
+    st.subheader(f"📅 Relatórios — {get_loja_nome(loja_id_ativa)}")
 
     st.markdown("### Vendas por período (por cupom)")
     c1, c2 = st.columns(2)
@@ -1274,9 +1615,9 @@ else:
     dt_ini = datetime(d_ini.year, d_ini.month, d_ini.day, 0, 0, 0)
     dt_fim = datetime(d_fim.year, d_fim.month, d_fim.day, 23, 59, 59)
 
-    dfp = listar_vendas_por_periodo_df(dt_ini, dt_fim)
+    dfp = listar_vendas_por_periodo_df(loja_id_ativa, dt_ini, dt_fim)
     if dfp.empty:
-        st.info("Sem vendas no período.")
+        st.info("Sem vendas no período nesta loja.")
     else:
         total_periodo = float(dfp["total"].sum())
         st.metric("Total do período", f"R$ {brl(total_periodo)}")
@@ -1286,10 +1627,10 @@ else:
     st.markdown("### Total por dia do mês")
     ano = st.number_input("Ano", min_value=2000, max_value=2100, value=date.today().year, step=1)
     mes = st.number_input("Mês", min_value=1, max_value=12, value=date.today().month, step=1)
-    dfd, total_mes = totais_por_dia_do_mes(int(ano), int(mes))
+    dfd, total_mes = totais_por_dia_do_mes(loja_id_ativa, int(ano), int(mes))
     st.metric("Total do mês", f"R$ {brl(total_mes)}")
     if dfd.empty:
-        st.info("Sem vendas no mês.")
+        st.info("Sem vendas no mês nesta loja.")
     else:
         dfd_show = dfd.copy()
         dfd_show["total"] = dfd_show["total"].map(lambda x: f"R$ {brl(x)}")
