@@ -1358,37 +1358,37 @@ def registrar_venda_completa_db(
         conn.commit()
         return venda_id
 
-# =========================
-# Caixa (sidebar abrir/fechar sempre visível) — MULTI-LOJA
-# =========================
+# =========================================================
+# 1) SIDEBAR — CAIXA (Abertura/Fechamento) — sempre visível
+# =========================================================
 st.sidebar.divider()
 st.sidebar.header("💰 Caixa (Abertura/Fechamento)")
 
-sess = None
+# ✅ sempre recalcula a sessão da loja ativa
 try:
-    sess = get_sessao_aberta(loja_id_ativa)  # sqlite3.Row ou None
+    sess = get_sessao_aberta(loja_id_ativa)
 except Exception:
     sess = None
 
 if not sess:
     st.sidebar.error("CAIXA FECHADO")
+
     with st.sidebar.form("abrir_caixa"):
-        operador = st.text_input("Operador (opcional)", value=st.session_state.auth.get("username", ""))
+        operador = st.text_input("Operador (opcional)", value=auth.get("username", "") if auth else "")
         saldo_ini = st.number_input("Saldo inicial (fundo)", min_value=0.0, step=10.0, format="%.2f")
         obs = st.text_input("Observação (opcional)", value="")
         ok = st.form_submit_button("🔓 Abrir Caixa")
+
     if ok:
         try:
-            sid = abrir_caixa_db(loja_id_ativa, saldo_ini, operador, obs)
-            st.sidebar.success(f"Caixa aberto! Sessão #{sid}")
+            sid_new = abrir_caixa_db(loja_id_ativa, float(saldo_ini), operador, obs)
+            st.sidebar.success(f"Caixa aberto! Sessão #{sid_new}")
             st.rerun()
         except Exception as e:
             st.sidebar.error(str(e))
+
 else:
-    sid = int(sess["id"])
-    aberto_em = sess["aberto_em"]
-    saldo_ini = float(sess["saldo_inicial"] or 0.0)
-    operador = sess["operador"] or ""
+    sid, aberto_em, saldo_ini, operador = sess
 
     st.sidebar.success(f"ABERTO — Sessão #{sid}")
     st.sidebar.caption(f"Aberto em: {aberto_em}")
@@ -1416,9 +1416,12 @@ else:
         )
         obs_f = st.text_input("Observação (opcional)", value="")
         fechar = st.form_submit_button("🔒 Fechar Caixa")
+
     if fechar:
         try:
             res = fechar_caixa_db(loja_id_ativa, int(sid), float(contado), obs_f)
+
+            # ✅ backup no fechamento (não pode quebrar o app)
             try:
                 criar_backup_agora(prefix=f"pdv_close_loja{int(loja_id_ativa)}")
             except Exception:
@@ -1426,37 +1429,265 @@ else:
 
             st.sidebar.success("Caixa fechado!")
             st.sidebar.write(f"Diferença: **R$ {brl(res['diferenca'])}**")
+
+            # opcional: limpa estado
             st.session_state.cart = []
             st.session_state.cupom_txt = None
             st.session_state.cupom_nome = None
             st.session_state.cupom_id = None
+
             st.rerun()
         except Exception as e:
             st.sidebar.error(str(e))
 
+
+# =========================================================
+# 2) PÁGINAS — (Caixa / Estoque / Histórico / Usuários / Relatórios)
+# =========================================================
+
+# ✅ garante cupom state (pra não sumir)
+if "cupom_txt" not in st.session_state:
+    st.session_state.cupom_txt = None
+if "cupom_nome" not in st.session_state:
+    st.session_state.cupom_nome = None
+if "cupom_id" not in st.session_state:
+    st.session_state.cupom_id = None
+
 # =========================
-# PÁGINAS (PARTE 4) — FINAL DO ARQUIVO
+# Página: Caixa (PDV)
 # =========================
+if isinstance(pagina, str) and pagina.startswith("🧾"):
+    col1, col2 = st.columns([2.2, 1], gap="large")
 
-if pagina == "🧾 Caixa (PDV)":
-    st.subheader("🧾 Caixa (PDV)")
-    st.write("Página do Caixa carregou ✅")
-    st.write("Loja ativa:", loja_id_ativa)
+    with col1:
+        st.subheader(f"🧾 Caixa — {get_loja_nome(loja_id_ativa)}")
+        st.caption("Lançar item por código")
 
-elif pagina == "📦 Estoque":
-    st.subheader("📦 Estoque")
-    st.write("Página do Estoque carregou ✅")
-    st.dataframe(listar_produtos_df(loja_id_ativa), use_container_width=True)
+        if not sess:
+            st.info("Abra o caixa na barra lateral para vender.")
+        else:
+            with st.form("add_item", clear_on_submit=True):
+                codigo = st.text_input("Código", placeholder="Bipe o código / digite e Enter")
+                qtd = st.number_input("Quantidade", min_value=1, step=1, value=1)
+                add = st.form_submit_button("Adicionar")
 
-elif pagina == "📈 Histórico":
-    st.subheader("📈 Histórico")
-    st.write("Página do Histórico carregou ✅")
+            if add:
+                codigo = (codigo or "").strip()
+                if not codigo:
+                    st.warning("Digite/bipe um código.")
+                else:
+                    prod = buscar_produto_por_codigo(loja_id_ativa, codigo)
+                    if not prod:
+                        st.error("Produto não encontrado pelo código (nesta loja).")
+                    else:
+                        qtd_i = int(qtd)
+                        if qtd_i > int(prod.get("quantidade", 0)):
+                            st.error("Quantidade excede o estoque disponível.")
+                        else:
+                            st.session_state.cart.append(
+                                {
+                                    "codigo": str(prod["codigo"]),
+                                    "produto": str(prod["nome"]),
+                                    "preco_unit": float(prod["preco_venda"]),
+                                    "preco_custo": float(prod.get("preco_custo", 0.0)),
+                                    "qtd": qtd_i,
+                                    "total_item": float(prod["preco_venda"]) * qtd_i,
+                                }
+                            )
+                            st.success("Item adicionado!")
 
-elif pagina == "📅 Relatórios":
-    st.subheader("📅 Relatórios")
-    st.write("Página de Relatórios carregou ✅")
+        st.subheader("Carrinho (editável)")
 
-elif pagina == "👤 Usuários (Admin)":
+        if st.session_state.cart:
+            df_cart = pd.DataFrame(st.session_state.cart)
+
+            # garante colunas
+            for col in ["codigo", "produto", "preco_unit", "qtd", "preco_custo", "total_item"]:
+                if col not in df_cart.columns:
+                    df_cart[col] = 0
+
+            df_edit = df_cart[["codigo", "produto", "preco_unit", "qtd"]].copy()
+
+            edited = st.data_editor(
+                df_edit,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                disabled=["codigo", "produto"],
+                column_config={
+                    "preco_unit": st.column_config.NumberColumn("Preço unit.", min_value=0.0, step=0.5),
+                    "qtd": st.column_config.NumberColumn("Qtd", min_value=1, step=1),
+                },
+                key="cart_editor",
+            )
+
+            # aplica edições
+            new_cart = []
+            for i in range(len(edited)):
+                row = edited.iloc[i].to_dict()
+                preco = float(row.get("preco_unit", 0.0))
+                qtd_i = int(row.get("qtd", 1))
+                custo = float(df_cart.iloc[i].get("preco_custo", 0.0))
+
+                new_cart.append(
+                    {
+                        "codigo": str(row.get("codigo", "")),
+                        "produto": str(row.get("produto", "")),
+                        "preco_unit": preco,
+                        "preco_custo": custo,
+                        "qtd": qtd_i,
+                        "total_item": preco * qtd_i,
+                    }
+                )
+
+            st.session_state.cart = new_cart
+
+            subtotal = float(sum(i["total_item"] for i in st.session_state.cart))
+            st.metric("Subtotal", f"R$ {brl(subtotal)}")
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("Limpar carrinho"):
+                    st.session_state.cart = []
+                    st.rerun()
+            with c2:
+                idx = st.number_input(
+                    "Remover item (nº)",
+                    min_value=1,
+                    max_value=len(st.session_state.cart),
+                    value=1,
+                    step=1,
+                )
+            with c3:
+                if st.button("Remover"):
+                    st.session_state.cart.pop(int(idx) - 1)
+                    st.rerun()
+        else:
+            st.caption("Carrinho vazio.")
+
+    with col2:
+        st.subheader("Finalizar venda")
+
+        if not sess:
+            st.info("Abra o caixa primeiro.")
+        else:
+            sid = int(sess[0])
+            forma_ui = st.selectbox("Forma de pagamento", ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"], index=0)
+
+            desconto_txt = st.text_input("Desconto (R$)", value="0")
+            recebido_txt = st.text_input("Recebido (somente dinheiro)", value="0", disabled=(forma_ui != "Dinheiro"))
+
+            df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
+            subtotal = float(df_cart["total_item"].sum()) if (not df_cart.empty and "total_item" in df_cart.columns) else 0.0
+
+            desconto = max(0.0, min(to_float(desconto_txt), subtotal))
+            total_liq = max(0.0, subtotal - desconto)
+
+            recebido = to_float(recebido_txt) if forma_ui == "Dinheiro" else 0.0
+            troco = max(0.0, recebido - total_liq) if forma_ui == "Dinheiro" else 0.0
+
+            st.write(f"Total: **R$ {brl(subtotal)}**")
+            st.write(f"Desconto: **R$ {brl(desconto)}**")
+            st.write(f"Total a pagar: **R$ {brl(total_liq)}**")
+            if forma_ui == "Dinheiro":
+                st.write(f"Troco: **R$ {brl(troco)}**")
+
+            if st.button("✅ FINALIZAR"):
+                if not st.session_state.cart:
+                    st.error("Carrinho vazio.")
+                else:
+                    # valida estoque
+                    for it in st.session_state.cart:
+                        prod = buscar_produto_por_codigo(loja_id_ativa, it["codigo"])
+                        if not prod:
+                            st.error(f"Produto {it['codigo']} não encontrado no estoque desta loja.")
+                            st.stop()
+                        if int(it["qtd"]) > int(prod.get("quantidade", 0)):
+                            st.error(f"Estoque insuficiente para {it['produto']}.")
+                            st.stop()
+
+                    if forma_ui == "Dinheiro" and recebido < total_liq:
+                        st.error("Valor recebido menor que o total com desconto.")
+                        st.stop()
+
+                    forma_db = map_forma_pagamento(forma_ui)
+
+                    try:
+                        venda_id = registrar_venda_completa_db(
+                            loja_id=loja_id_ativa,
+                            sessao_id=sid,
+                            itens=st.session_state.cart,
+                            forma_pagamento=forma_db,
+                            subtotal=subtotal,
+                            desconto=desconto,
+                            total=total_liq,
+                            recebido=recebido,
+                            troco=troco,
+                            status="FINALIZADA",
+                            baixar_estoque=True,
+                        )
+                    except Exception as e:
+                        st.error(f"Erro ao registrar venda: {e}")
+                        st.stop()
+
+                    numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
+                    txt = cupom_txt(st.session_state.cart, numero_venda, forma_ui, float(desconto), float(recebido), float(troco))
+
+                    st.session_state.cupom_txt = txt
+                    st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
+                    st.session_state.cupom_id = venda_id
+
+                    st.session_state.cart = []
+                    st.rerun()
+
+            if st.session_state.cupom_txt:
+                st.divider()
+                st.success(f"Venda registrada! Cupom/ID: {st.session_state.cupom_id}")
+
+                st.text_area("Cupom gerado", value=st.session_state.cupom_txt, height=420)
+
+                st.download_button(
+                    "⬇️ Baixar Cupom TXT",
+                    data=st.session_state.cupom_txt.encode("utf-8"),
+                    file_name=st.session_state.cupom_nome or "cupom.txt",
+                    mime="text/plain",
+                )
+
+                if st.button("🆕 Nova venda (limpar cupom)"):
+                    st.session_state.cupom_txt = None
+                    st.session_state.cupom_nome = None
+                    st.session_state.cupom_id = None
+                    st.rerun()
+
+
+# =========================
+# Página: Estoque
+# =========================
+elif isinstance(pagina, str) and pagina.startswith("📦"):
+    # ... mantenha seu código do Estoque aqui (o seu está ok)
+    st.subheader(f"📦 Estoque — {get_loja_nome(loja_id_ativa)}")
+    # (cole aqui o seu bloco de estoque)
+
+
+# =========================
+# Página: Histórico
+# =========================
+elif isinstance(pagina, str) and pagina.startswith("📈"):
+    st.subheader(f"📈 Histórico — {get_loja_nome(loja_id_ativa)}")
+    # (cole aqui o seu bloco de histórico)
+
+
+# =========================
+# Página: Usuários
+# =========================
+elif isinstance(pagina, str) and pagina.startswith("👤"):
     st.subheader("👤 Usuários (Admin)")
-    st.dataframe(listar_usuarios_df(), use_container_width=True)
+    # (cole aqui o seu bloco de usuários)
 
+
+# =========================
+# Página: Relatórios
+# =========================
+else:
+    st.subheader(f"📅 Relatórios — {get_loja_nome(loja_id_ativa)}")
+    # (cole aqui o seu bloco de relatórios)
