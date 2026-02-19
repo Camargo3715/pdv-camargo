@@ -10,7 +10,7 @@ import secrets
 import hashlib
 import glob
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 import streamlit as st
 import pandas as pd
@@ -775,6 +775,9 @@ def get_loja_nome(loja_id) -> str:
     return str(r["nome"]) if r else f"Loja {lid}"
 
 
+# ✅ IMPORT (corrige NameError: date)
+from datetime import datetime, timedelta, date
+
 # =========================
 # Produtos (Estoque) — MULTI-LOJA
 # =========================
@@ -886,6 +889,39 @@ def baixar_estoque_por_codigo(loja_id: int, codigo: str, qtd: int):
 
 
 # =========================
+# Histórico (itens vendidos) — MULTI-LOJA
+# ✅ corrige NameError: listar_vendas_itens_df
+# =========================
+def listar_vendas_itens_df(loja_id: int, filtro_produto: str = ""):
+    filtro = f"%{(filtro_produto or '').strip()}%"
+
+    with conectar() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                vc.datahora,
+                vi.codigo,
+                vi.produto,
+                vi.preco_unit,
+                vi.qtd,
+                vi.total_item,
+                vc.forma_pagamento,
+                vc.id AS venda_id
+            FROM vendas_itens vi
+            JOIN vendas_cabecalho vc ON vc.id = vi.venda_id
+            WHERE
+                vi.loja_id = ?
+                AND vc.status = 'FINALIZADA'
+                AND vi.produto LIKE ?
+            ORDER BY vc.datahora DESC, vi.id DESC
+            """,
+            conn,
+            params=(int(loja_id), filtro),
+        )
+    return df
+
+
+# =========================
 # Caixa (Abertura/Fechamento) — MULTI-LOJA
 # =========================
 def get_sessao_aberta(loja_id: int):
@@ -907,7 +943,6 @@ def get_sessao_aberta(loja_id: int):
 def abrir_caixa_db(loja_id: int, saldo_inicial: float, operador: str = "", obs: str = "") -> int:
     atual = get_sessao_aberta(loja_id)
     if atual:
-        # com row_factory
         raise RuntimeError(f"Já existe um caixa ABERTO nesta loja (Sessão #{atual['id']}). Feche antes de abrir outro.")
     with conectar() as conn:
         cur = conn.cursor()
@@ -1013,351 +1048,6 @@ def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: s
         "diferenca": diferenca,
         "fechado_em": agora,
     }
-
-# =========================
-# App (UI)
-# =========================
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-# inicializa tabelas
-inicializar_banco()
-inicializar_usuarios()
-
-# ✅ estados globais
-if "cart" not in st.session_state:
-    st.session_state.cart = []
-
-if "cupom_txt" not in st.session_state:
-    st.session_state.cupom_txt = None
-if "cupom_nome" not in st.session_state:
-    st.session_state.cupom_nome = None
-if "cupom_id" not in st.session_state:
-    st.session_state.cupom_id = None
-
-# ✅ auth: dict com user autenticado
-if "auth" not in st.session_state:
-    st.session_state.auth = None
-
-# ✅ loja ativa (multi-loja)
-if "loja_id_ativa" not in st.session_state:
-    st.session_state.loja_id_ativa = None
-
-st.title(APP_TITLE)
-
-# ✅ informações úteis (sem expor demais)
-st.caption(f"DB: {DB_PATH}")
-st.caption(f"Backups: {BACKUP_DIR} | Retenção: {BACKUP_RETENTION_DAYS} dias | Ativo: {('SIM' if BACKUP_ENABLED else 'NÃO')}")
-
-if IS_RENDER and (BACKUP_DIR or "").startswith("/tmp"):
-    st.warning(
-        "⚠️ Render Free: backups em /tmp podem SUMIR ao reiniciar. "
-        "Recomendado: usar Render Disk e setar BACKUP_DIR=/var/data/backups e DATABASE_PATH=/var/data/pdv.db"
-    )
-
-# =========================
-# Login (Sidebar)
-# =========================
-st.sidebar.divider()
-st.sidebar.header("🔐 Login")
-
-auth = st.session_state.auth
-
-if not auth:
-    with st.sidebar.form("login_form"):
-        u = st.text_input("Usuário", value="")
-        p = st.text_input("Senha", value="", type="password")
-        entrar = st.form_submit_button("Entrar")
-
-    if entrar:
-        user = autenticar(u, p)
-        if not user:
-            st.sidebar.error("Usuário/senha inválidos (ou usuário inativo).")
-        else:
-            # user já vem com "tipo" e "loja_id" (Parte 2 atualizada)
-            st.session_state.auth = {
-                "username": user["username"],
-                "nome": user["nome"],
-                "role": user["role"],          # mantém compatibilidade
-                "tipo": user["tipo"],          # ✅ novo padrão
-                "loja_id": user.get("loja_id")
-            }
-            # reseta loja ativa ao logar
-            st.session_state.loja_id_ativa = None
-            st.rerun()
-
-    st.info("Faça login para usar o sistema.")
-    st.stop()
-else:
-    tipo = st.session_state.auth.get("tipo") or role_to_tipo(st.session_state.auth.get("role"))
-    st.sidebar.success(f"Logado: {auth['username']} ({tipo})")
-
-    if st.sidebar.button("Sair"):
-        st.session_state.auth = None
-
-        # limpa loja e estado sensível
-        for k in ["loja_id", "loja_id_ativa", "pagina"]:
-            if k in st.session_state:
-                del st.session_state[k]
-
-        st.session_state.cart = []
-        st.session_state.cupom_txt = None
-        st.session_state.cupom_nome = None
-        st.session_state.cupom_id = None
-        st.rerun()
-
-# =========================
-# Seleção / Fixo de Loja (define loja_id_ativa)
-# =========================
-tipo = st.session_state.auth.get("tipo") or role_to_tipo(st.session_state.auth.get("role"))
-tipo = str(tipo).strip().lower()
-user_loja_id = st.session_state.auth.get("loja_id")
-
-st.sidebar.divider()
-st.sidebar.header("🏪 Loja")
-
-df_lojas = listar_lojas_df()
-lojas_ativas = df_lojas[df_lojas["ativa"] == 1] if (df_lojas is not None and not df_lojas.empty) else df_lojas
-
-# inicializa loja ativa
-if st.session_state.loja_id_ativa is None:
-    if tipo == "admin":
-        st.session_state.loja_id_ativa = int(lojas_ativas.iloc[0]["id"]) if (lojas_ativas is not None and not lojas_ativas.empty) else 1
-    else:
-        st.session_state.loja_id_ativa = int(user_loja_id or 1)
-
-# admin pode escolher loja
-if tipo == "admin":
-    opcoes = [f"{int(r.id)} — {r.nome}" for r in lojas_ativas.itertuples(index=False)]
-    ids = [int(r.id) for r in lojas_ativas.itertuples(index=False)]
-    try:
-        idx = ids.index(int(st.session_state.loja_id_ativa))
-    except Exception:
-        idx = 0
-
-    escolha = st.sidebar.selectbox("Selecionar loja", opcoes, index=idx)
-    st.session_state.loja_id_ativa = int(escolha.split("—")[0].strip())
-
-else:
-    st.sidebar.info(f"Loja fixa: **{get_loja_nome(int(st.session_state.loja_id_ativa))}**")
-
-loja_id_ativa = int(st.session_state.loja_id_ativa)
-st.sidebar.caption(f"Loja ativa ID: {loja_id_ativa}")
-
-# =========================
-# Admin — Backup manual (UI)
-# =========================
-if tipo == "admin":
-    st.sidebar.divider()
-    st.sidebar.header("🧰 Admin: Backup")
-
-    if st.sidebar.button("📦 Gerar backup agora"):
-        try:
-            bp = criar_backup_agora(prefix="pdv_manual")
-            if bp:
-                st.sidebar.success(f"Backup criado: {os.path.basename(bp)}")
-            else:
-                st.sidebar.warning("Backup não criado (DB ainda não existe ou backup desabilitado).")
-        except Exception as e:
-            st.sidebar.error(f"Falha ao gerar backup: {e}")
-
-    # Lista backups e permite baixar
-    try:
-        backups = listar_backups(prefix="pdv_manual")[:10]
-        if backups:
-            st.sidebar.caption("Últimos backups manuais:")
-            for fp in backups:
-                try:
-                    nome = os.path.basename(fp)
-                    with open(fp, "rb") as f:
-                        st.sidebar.download_button(
-                            label=f"⬇️ {nome}",
-                            data=f.read(),
-                            file_name=nome,
-                            mime="application/octet-stream",
-                        )
-                except Exception:
-                    pass
-        else:
-            st.sidebar.caption("Nenhum backup manual ainda.")
-    except Exception:
-        st.sidebar.caption("Não foi possível listar backups.")
-
-# =========================
-# Navegação por perfil (st.sidebar.radio)
-# =========================
-paginas = ["🧾 Caixa (PDV)", "📈 Histórico", "📦 Estoque", "📅 Relatórios"]
-
-# só ADMIN vê usuários
-if tipo == "admin":
-    paginas.append("👤 Usuários (Admin)")
-
-# estado da navegação (sem sumir)
-if "pagina" not in st.session_state:
-    st.session_state.pagina = "🧾 Caixa (PDV)"
-
-if st.session_state.pagina not in paginas:
-    st.session_state.pagina = "🧾 Caixa (PDV)"
-
-pagina = st.sidebar.radio(
-    "Navegação",
-    paginas,
-    index=paginas.index(st.session_state.pagina),
-    key="pagina",
-)
-
-# =========================
-# Cupom (TXT para download) — DEFINIR ANTES DA UI DAS PÁGINAS
-# =========================
-def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float, recebido: float, troco: float):
-    largura = 40
-    loja = {
-        "nome": "Camargo Celulares",
-        "cnpj": "",
-        "ie": "",
-        "endereco": "",
-        "cidade": "",
-        "telefone": "",
-        "mensagem": "OBRIGADO! VOLTE SEMPRE :)",
-        "mostrar_cupom_nao_fiscal": True,
-    }
-
-    def centralizar(t):
-        t = (t or "").strip()
-        return t[:largura] if len(t) >= largura else t.center(largura)
-
-    def sep(ch="-"):
-        return ch * largura
-
-    def linha_valor(rotulo, valor):
-        val = brl(valor)
-        esp = max(1, largura - len(rotulo) - len(val))
-        return f"{rotulo}{' ' * esp}{val}"
-
-    def fmt_l2(qtd, unit, tot):
-        left = f"{qtd} x {brl(unit)}"
-        right = brl(tot)
-        esp = max(1, largura - len(left) - len(right))
-        return f"{left}{' ' * esp}{right}"
-
-    dt = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    subtotal = sum(float(i["total_item"]) for i in itens)
-    total_pagar = max(0.0, float(subtotal) - float(desconto))
-
-    out = []
-    if loja["mostrar_cupom_nao_fiscal"]:
-        out.append(centralizar("CUPOM NAO FISCAL"))
-    out.append(centralizar(loja["nome"]))
-    if loja["cnpj"]:
-        out.append(centralizar(f"CNPJ: {loja['cnpj']}"))
-    out.append(sep("="))
-    out.append(f"DATA: {dt}")
-    out.append(f"VENDA: {numero_venda}")
-    out.append(sep("-"))
-    out.append("ITENS")
-    out.append(sep("-"))
-
-    for it in itens:
-        nome = f"{it.get('produto','')} ({it.get('codigo','')})".strip()
-        out.append(nome[:largura])
-        out.append(fmt_l2(int(it["qtd"]), float(it["preco_unit"]), float(it["total_item"])))
-
-    out.append(sep("-"))
-    out.append(linha_valor("SUBTOTAL", subtotal))
-    if float(desconto) > 0:
-        out.append(linha_valor("DESCONTO", float(desconto)))
-    out.append(linha_valor("TOTAL", total_pagar))
-    out.append(sep("-"))
-    out.append(f"PAGAMENTO: {pagamento_ui}")
-    if pagamento_ui == "Dinheiro":
-        out.append(linha_valor("RECEBIDO", float(recebido)))
-        out.append(linha_valor("TROCO", float(troco)))
-    out.append(sep("="))
-    out.append(centralizar(loja["mensagem"]))
-    out.append(sep("="))
-    return "\n".join([l for l in out if l is not None])
-
-# =========================
-# Registrar venda completa — DEFINIR ANTES DA PÁGINA CAIXA
-# =========================
-def registrar_venda_completa_db(
-    loja_id: int,
-    sessao_id: int,
-    itens: list,
-    forma_pagamento: str,
-    subtotal: float,
-    desconto: float,
-    total: float,
-    recebido: float,
-    troco: float,
-    status: str = "FINALIZADA",
-    baixar_estoque: bool = True,
-):
-    if not itens:
-        raise RuntimeError("Nenhum item informado.")
-
-    with conectar() as conn:
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-
-        cur.execute(
-            """
-            INSERT INTO vendas_cabecalho
-            (loja_id, datahora, sessao_id, subtotal, desconto, total,
-             forma_pagamento, recebido, troco, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(loja_id),
-                agora_iso(),
-                int(sessao_id),
-                float(subtotal),
-                float(desconto),
-                float(total),
-                str(forma_pagamento),
-                float(recebido),
-                float(troco),
-                str(status),
-            ),
-        )
-        venda_id = int(cur.lastrowid)
-
-        for it in itens:
-            codigo = str(it.get("codigo", "")).strip()
-            produto = str(it.get("produto", "")).strip()
-            preco_unit = float(it.get("preco_unit", 0) or 0)
-            preco_custo = float(it.get("preco_custo", 0) or 0)
-            qtd = int(it.get("qtd", 0) or 0)
-            total_item = float(it.get("total_item", 0) or 0)
-
-            if qtd <= 0:
-                conn.rollback()
-                raise RuntimeError(f"Quantidade inválida no item: {produto}")
-
-            cur.execute(
-                """
-                INSERT INTO vendas_itens
-                (loja_id, venda_id, codigo, produto, preco_unit, preco_custo, qtd, total_item)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (int(loja_id), int(venda_id), codigo, produto, preco_unit, preco_custo, qtd, total_item),
-            )
-
-            if baixar_estoque:
-                cur.execute(
-                    """
-                    UPDATE produtos
-                    SET quantidade = quantidade - ?
-                    WHERE loja_id = ? AND codigo = ? AND quantidade >= ?
-                    """,
-                    (qtd, int(loja_id), codigo, qtd),
-                )
-                if cur.rowcount == 0:
-                    conn.rollback()
-                    raise RuntimeError(f"Estoque insuficiente para {produto} ({codigo}).")
-
-        conn.commit()
-        return venda_id
-
 # =========================================================
 # 1) SIDEBAR — CAIXA (Abertura/Fechamento) — sempre visível
 # =========================================================
