@@ -1,7 +1,7 @@
 # pdv_web_full.py
 # PDV Camargo Celulares — Web (Streamlit) | Completo: Caixa + Estoque + Histórico + Relatórios + Login
 # ✅ Multi-loja: 1 banco, dados separados por loja_id (estoque/vendas/caixa/usuários)
-# ✅ Admin: botão para ZERAR UMA LOJA (estoque + vendas + caixa) com segurança
+# ✅ Admin: gestão de usuários + seleção de loja + opção (futura) de zerar loja com segurança
 # ✅ Backup automático (SQLite): diário + retenção + backup seguro via SQLite backup API
 
 import os
@@ -9,6 +9,7 @@ import sqlite3
 import secrets
 import hashlib
 import glob
+from typing import Optional
 
 from datetime import datetime, timedelta, date
 
@@ -16,7 +17,6 @@ import streamlit as st
 import pandas as pd
 
 APP_TITLE = "PDV Camargo Celulares — Web"
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # =========================
@@ -28,7 +28,7 @@ DEFAULT_DB_LOCAL = os.path.join(BASE_DIR, "pdv.db")
 IS_RENDER = bool(os.getenv("RENDER")) or bool(os.getenv("RENDER_SERVICE_ID"))
 
 # No Render Free, /var/data NÃO existe (sem Disk). Então usa /tmp.
-# Se você estiver no Render com Disk, pode setar DATABASE_PATH=/var/data/pdv.db
+# Se você estiver no Render com Disk, set DATABASE_PATH=/var/data/pdv.db
 if IS_RENDER:
     DB_PATH = os.getenv("DATABASE_PATH", "/tmp/pdv.db")
 else:
@@ -45,10 +45,6 @@ except Exception:
 # =========================
 # BACKUP (Automático)
 # =========================
-# Onde salvar backups:
-# - Local: ./backups
-# - Render: se tiver Disk: /var/data/backups (recomendado via BACKUP_DIR)
-# - Render free: /tmp/backups (vai sumir ao reiniciar)
 DEFAULT_BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 if IS_RENDER:
     BACKUP_DIR = os.getenv("BACKUP_DIR", "/tmp/backups")
@@ -116,7 +112,10 @@ def sqlite_backup_seguro(db_path: str, backup_path: str):
     try:
         src = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         src.execute("PRAGMA foreign_keys = ON;")
-        src.execute("PRAGMA journal_mode=WAL;")
+        try:
+            src.execute("PRAGMA journal_mode=WAL;")
+        except Exception:
+            pass
 
         dst = sqlite3.connect(backup_path, check_same_thread=False, timeout=30)
         src.backup(dst)
@@ -180,10 +179,7 @@ def agora_iso() -> str:
 
 def tabela_existe(conn: sqlite3.Connection, nome: str) -> bool:
     cur = conn.cursor()
-    cur.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (nome,),
-    )
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (nome,))
     return cur.fetchone() is not None
 
 
@@ -203,13 +199,15 @@ def garantir_lojas_padrao(conn: sqlite3.Connection):
     """
     Garante a tabela lojas e cadastra 3 lojas padrão se estiver vazia.
     """
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS lojas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT NOT NULL,
-        ativa INTEGER NOT NULL DEFAULT 1
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lojas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            ativa INTEGER NOT NULL DEFAULT 1
+        )
+        """
     )
-    """)
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM lojas")
     total = int(cur.fetchone()[0] or 0)
@@ -223,7 +221,7 @@ def garantir_lojas_padrao(conn: sqlite3.Connection):
 def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     """
     Migra tabela produtos antiga para multi-loja (UNIQUE(loja_id, codigo)).
-    ✅ Corrigido: agora é robusto e não quebra se o schema antigo for diferente.
+    ✅ Robusto e não quebra se o schema antigo for diferente.
     """
     if not tabela_existe(conn, "produtos"):
         return
@@ -232,20 +230,16 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     if coluna_existe(conn, "produtos", "loja_id"):
         return
 
-    # Detecta colunas existentes (legados possíveis)
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(produtos)")
     cols = [r[1] for r in cur.fetchall()]
 
-    # Mapeia possíveis nomes antigos -> padrão
-    # Padrão alvo: codigo, nome, preco_custo, preco_venda, quantidade
     has_codigo = "codigo" in cols
     has_nome = "nome" in cols
     has_pc = "preco_custo" in cols
     has_pv = "preco_venda" in cols
     has_qtd = "quantidade" in cols
 
-    # Legado CSV/primeiros modelos:
     legacy_prod = "Produto" in cols
     legacy_preco = "Preço" in cols or "Preco" in cols
     legacy_qtd = "Quantidade" in cols
@@ -269,19 +263,21 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     except Exception:
         return
 
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS produtos_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        loja_id INTEGER NOT NULL,
-        codigo TEXT NOT NULL,
-        nome TEXT NOT NULL,
-        preco_custo REAL NOT NULL DEFAULT 0,
-        preco_venda REAL NOT NULL,
-        quantidade INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(loja_id, codigo),
-        FOREIGN KEY (loja_id) REFERENCES lojas(id)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS produtos_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja_id INTEGER NOT NULL,
+            codigo TEXT NOT NULL,
+            nome TEXT NOT NULL,
+            preco_custo REAL NOT NULL DEFAULT 0,
+            preco_venda REAL NOT NULL,
+            quantidade INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(loja_id, codigo),
+            FOREIGN KEY (loja_id) REFERENCES lojas(id)
+        )
+        """
     )
-    """)
 
     for (pid, codigo, nome, pc, pv, qtd) in rows:
         conn.execute(
@@ -302,20 +298,17 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
 # =========================
 def conectar():
     """
-    Conecta no SQLite. Se o caminho atual falhar (permissão/pasta),
-    cai automaticamente para /tmp/pdv.db para não dar tela preta.
-
-    ✅ Ajustes:
-    - timeout maior (evita "database is locked")
-    - WAL melhora concorrência no Streamlit/Render
-    - row_factory para retornar dicionário (sqlite3.Row)
+    Conecta no SQLite. Se o caminho atual falhar, cai para /tmp/pdv.db.
     """
     global DB_PATH
     try:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA journal_mode=WAL;")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+        except Exception:
+            pass
         return conn
     except sqlite3.OperationalError:
         DB_PATH = "/tmp/pdv.db"
@@ -326,38 +319,32 @@ def conectar():
         conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA journal_mode=WAL;")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+        except Exception:
+            pass
         return conn
 
 
 def executar_query(sql: str, params: tuple = ()):
-    """
-    SELECT -> retorna lista de dict-like (sqlite3.Row).
-    """
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(sql, params)
-        rows = cur.fetchall()
-        return rows
+        return cur.fetchall()
 
 
 def executar_exec(sql: str, params: tuple = ()):
-    """
-    INSERT/UPDATE/DELETE -> retorna lastrowid quando fizer sentido.
-    """
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(sql, params)
         conn.commit()
         return cur.lastrowid
-
-
 def inicializar_banco():
     """
-    ✅ Inicializa banco já no padrão MULTI-LOJA.
+    ✅ Inicializa banco MULTI-LOJA.
     - Cria tabela lojas + cadastra 3 lojas (se vazio)
-    - Migra tabelas antigas para receber loja_id (tudo vira loja_id=1)
-    - ✅ Auto-backup diário + retenção (se habilitado)
+    - Migra produtos legado para multi-loja (tudo vira loja_id=1)
+    - Auto-backup diário + retenção (se habilitado)
     """
     with conectar() as conn:
         cur = conn.cursor()
@@ -365,101 +352,111 @@ def inicializar_banco():
         # 1) Lojas
         garantir_lojas_padrao(conn)
 
-        # 2) Produtos (rebuild se era legado)
+        # 2) Produtos
         if tabela_existe(conn, "produtos"):
             migrar_produtos_para_multiloja(conn)
         else:
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS produtos (
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS produtos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    loja_id INTEGER NOT NULL,
+                    codigo TEXT NOT NULL,
+                    nome TEXT NOT NULL,
+                    preco_custo REAL NOT NULL DEFAULT 0,
+                    preco_venda REAL NOT NULL,
+                    quantidade INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(loja_id, codigo),
+                    FOREIGN KEY (loja_id) REFERENCES lojas(id)
+                )
+                """
+            )
+
+        # (LEGADO) vendas
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vendas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                loja_id INTEGER NOT NULL,
-                codigo TEXT NOT NULL,
-                nome TEXT NOT NULL,
-                preco_custo REAL NOT NULL DEFAULT 0,
-                preco_venda REAL NOT NULL,
-                quantidade INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(loja_id, codigo),
+                loja_id INTEGER NOT NULL DEFAULT 1,
+                datahora TEXT NOT NULL,
+                codigo TEXT,
+                produto TEXT NOT NULL,
+                preco_unit REAL NOT NULL,
+                qtd INTEGER NOT NULL,
+                total REAL NOT NULL,
                 FOREIGN KEY (loja_id) REFERENCES lojas(id)
             )
-            """)
-
-        # (LEGADO) vendas - mantém por compatibilidade, mas agora com loja_id
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS vendas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loja_id INTEGER NOT NULL DEFAULT 1,
-            datahora TEXT NOT NULL,
-            codigo TEXT,
-            produto TEXT NOT NULL,
-            preco_unit REAL NOT NULL,
-            qtd INTEGER NOT NULL,
-            total REAL NOT NULL,
-            FOREIGN KEY (loja_id) REFERENCES lojas(id)
+            """
         )
-        """)
 
-        # Caixa sessões (agora por loja)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS caixa_sessoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loja_id INTEGER NOT NULL DEFAULT 1,
-            aberto_em TEXT NOT NULL,
-            fechado_em TEXT,
-            status TEXT NOT NULL DEFAULT 'ABERTO',
-            saldo_inicial REAL NOT NULL DEFAULT 0,
-            saldo_final_sistema REAL NOT NULL DEFAULT 0,
-            saldo_final_informado REAL NOT NULL DEFAULT 0,
-            diferenca REAL NOT NULL DEFAULT 0,
-            operador TEXT,
-            obs_abertura TEXT,
-            obs_fechamento TEXT,
-            FOREIGN KEY (loja_id) REFERENCES lojas(id)
+        # Caixa sessões
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS caixa_sessoes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                loja_id INTEGER NOT NULL DEFAULT 1,
+                aberto_em TEXT NOT NULL,
+                fechado_em TEXT,
+                status TEXT NOT NULL DEFAULT 'ABERTO',
+                saldo_inicial REAL NOT NULL DEFAULT 0,
+                saldo_final_sistema REAL NOT NULL DEFAULT 0,
+                saldo_final_informado REAL NOT NULL DEFAULT 0,
+                diferenca REAL NOT NULL DEFAULT 0,
+                operador TEXT,
+                obs_abertura TEXT,
+                obs_fechamento TEXT,
+                FOREIGN KEY (loja_id) REFERENCES lojas(id)
+            )
+            """
         )
-        """)
 
-        # Vendas cabeçalho (agora por loja)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS vendas_cabecalho (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loja_id INTEGER NOT NULL DEFAULT 1,
-            datahora TEXT NOT NULL,
-            sessao_id INTEGER,
-            subtotal REAL NOT NULL DEFAULT 0,
-            desconto REAL NOT NULL DEFAULT 0,
-            total REAL NOT NULL DEFAULT 0,
-            forma_pagamento TEXT NOT NULL,
-            recebido REAL NOT NULL DEFAULT 0,
-            troco REAL NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'FINALIZADA',
-            FOREIGN KEY (loja_id) REFERENCES lojas(id),
-            FOREIGN KEY (sessao_id) REFERENCES caixa_sessoes(id)
+        # Vendas cabeçalho
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vendas_cabecalho (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                loja_id INTEGER NOT NULL DEFAULT 1,
+                datahora TEXT NOT NULL,
+                sessao_id INTEGER,
+                subtotal REAL NOT NULL DEFAULT 0,
+                desconto REAL NOT NULL DEFAULT 0,
+                total REAL NOT NULL DEFAULT 0,
+                forma_pagamento TEXT NOT NULL,
+                recebido REAL NOT NULL DEFAULT 0,
+                troco REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'FINALIZADA',
+                FOREIGN KEY (loja_id) REFERENCES lojas(id),
+                FOREIGN KEY (sessao_id) REFERENCES caixa_sessoes(id)
+            )
+            """
         )
-        """)
 
-        # Vendas itens (agora por loja)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS vendas_itens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loja_id INTEGER NOT NULL DEFAULT 1,
-            venda_id INTEGER NOT NULL,
-            codigo TEXT,
-            produto TEXT NOT NULL,
-            preco_unit REAL NOT NULL,
-            preco_custo REAL NOT NULL DEFAULT 0,
-            qtd INTEGER NOT NULL,
-            total_item REAL NOT NULL,
-            FOREIGN KEY (loja_id) REFERENCES lojas(id),
-            FOREIGN KEY (venda_id) REFERENCES vendas_cabecalho(id) ON DELETE CASCADE
+        # Vendas itens
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vendas_itens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                loja_id INTEGER NOT NULL DEFAULT 1,
+                venda_id INTEGER NOT NULL,
+                codigo TEXT,
+                produto TEXT NOT NULL,
+                preco_unit REAL NOT NULL,
+                preco_custo REAL NOT NULL DEFAULT 0,
+                qtd INTEGER NOT NULL,
+                total_item REAL NOT NULL,
+                FOREIGN KEY (loja_id) REFERENCES lojas(id),
+                FOREIGN KEY (venda_id) REFERENCES vendas_cabecalho(id) ON DELETE CASCADE
+            )
+            """
         )
-        """)
 
-        # 3) Migração: adiciona loja_id nas tabelas existentes (se ainda não tiver)
+        # Migração: adiciona loja_id nas tabelas existentes
         for tabela in ["vendas", "caixa_sessoes", "vendas_cabecalho", "vendas_itens"]:
             if tabela_existe(conn, tabela) and not coluna_existe(conn, tabela, "loja_id"):
                 add_coluna_se_nao_existe(conn, tabela, "loja_id INTEGER NOT NULL DEFAULT 1", "loja_id")
                 conn.execute(f"UPDATE {tabela} SET loja_id = 1 WHERE loja_id IS NULL")
 
-        # Índices (inclui loja)
+        # Índices
         cur.execute("CREATE INDEX IF NOT EXISTS idx_produtos_loja_codigo ON produtos(loja_id, codigo)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_cabecalho_loja_datahora ON vendas_cabecalho(loja_id, datahora)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_cabecalho_sessao ON vendas_cabecalho(sessao_id)")
@@ -468,19 +465,13 @@ def inicializar_banco():
 
         conn.commit()
 
-    # ✅ Auto-backup diário
     auto_backup_se_precisar(prefix="pdv")
+
 
 # =========================
 # Usuários / Auth (Login)
 # =========================
-from typing import Optional
-
 def gerar_hash_senha(senha: str) -> tuple[str, str]:
-    """
-    PBKDF2-HMAC SHA256 com salt aleatório.
-    Retorna (salt_hex, hash_hex).
-    """
     senha_b = (senha or "").encode("utf-8")
     salt = secrets.token_bytes(16)
     dk = hashlib.pbkdf2_hmac("sha256", senha_b, salt, 120_000)
@@ -505,33 +496,30 @@ def role_to_tipo(role: str) -> str:
 
 def inicializar_usuarios():
     """
-    ✅ Cria a tabela usuarios (multi-loja) e, se não existir nenhum usuário,
-    cria um ADMIN inicial usando ADMIN_USER/ADMIN_PASS (Render env),
-    ou padrão admin/admin123.
+    Cria tabela usuarios (multi-loja) e cria ADMIN inicial se vazio.
     """
     with conectar() as conn:
         cur = conn.cursor()
-
-        # garante lojas (pra FK)
         garantir_lojas_padrao(conn)
 
-        # Cria tabela (se não existir)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            nome TEXT,
-            role TEXT NOT NULL CHECK(role IN ('ADMIN','DONO','OPERADOR')),
-            loja_id INTEGER,
-            pass_salt TEXT NOT NULL,
-            pass_hash TEXT NOT NULL,
-            ativo INTEGER NOT NULL DEFAULT 1,
-            criado_em TEXT NOT NULL,
-            FOREIGN KEY (loja_id) REFERENCES lojas(id)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                nome TEXT,
+                role TEXT NOT NULL CHECK(role IN ('ADMIN','DONO','OPERADOR')),
+                loja_id INTEGER,
+                pass_salt TEXT NOT NULL,
+                pass_hash TEXT NOT NULL,
+                ativo INTEGER NOT NULL DEFAULT 1,
+                criado_em TEXT NOT NULL,
+                FOREIGN KEY (loja_id) REFERENCES lojas(id)
+            )
+            """
         )
-        """)
 
-        # ✅ Migração suave: se a tabela já existia e não tem loja_id
+        # Migração suave
         if not coluna_existe(conn, "usuarios", "loja_id"):
             add_coluna_se_nao_existe(conn, "usuarios", "loja_id INTEGER", "loja_id")
             try:
@@ -540,7 +528,6 @@ def inicializar_usuarios():
                 pass
             conn.commit()
 
-        # Índices úteis
         cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_role ON usuarios(role)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_loja ON usuarios(loja_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_ativo ON usuarios(ativo)")
@@ -551,8 +538,8 @@ def inicializar_usuarios():
         if total == 0:
             admin_user = (os.getenv("ADMIN_USER") or "admin").strip().lower()
             admin_pass = (os.getenv("ADMIN_PASS") or "admin123").strip()
-
             salt, ph = gerar_hash_senha(admin_pass)
+
             cur.execute(
                 """
                 INSERT INTO usuarios (username, nome, role, loja_id, pass_salt, pass_hash, ativo, criado_em)
@@ -598,9 +585,7 @@ def get_usuario(username: str):
 
 def autenticar(username: str, senha: str):
     user = get_usuario(username)
-    if not user:
-        return None
-    if user["ativo"] != 1:
+    if not user or user["ativo"] != 1:
         return None
     if not verificar_senha(senha, user["salt"], user["hash"]):
         return None
@@ -635,9 +620,6 @@ def criar_usuario(username: str, nome: str, role: str, senha: str, loja_id: Opti
     if len((senha or "").strip()) < 4:
         raise ValueError("Senha muito curta (mín. 4).")
 
-    # Regras multi-loja:
-    # - ADMIN: loja_id pode ser None (vê todas)
-    # - DONO/OPERADOR: loja_id obrigatório
     if role in ("DONO", "OPERADOR") and not loja_id:
         raise ValueError("Para DONO/OPERADOR é obrigatório informar loja_id.")
     if role == "ADMIN":
@@ -707,17 +689,10 @@ def atualizar_senha(username: str, nova_senha: str):
 # Utilitários
 # =========================
 def to_float(txt) -> float:
-    """
-    Converte entrada do usuário para float.
-    Aceita: "10", "10,50", "1.234,56", "R$ 10,00", "".
-    """
     s = str(txt or "").strip()
     if not s:
         return 0.0
-
-    s = s.replace("R$", "").replace("r$", "").strip()
-    s = s.replace(" ", "")
-
+    s = s.replace("R$", "").replace("r$", "").strip().replace(" ", "")
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
     try:
@@ -744,24 +719,16 @@ def map_forma_pagamento(rotulo_ui: str) -> str:
     if "débito" in r or "debito" in r:
         return "CARTAO_DEBITO"
     return "OUTRO"
-
-
 # =========================
 # Lojas (helpers)
 # =========================
 def listar_lojas_df():
     with conectar() as conn:
-        df = pd.read_sql_query(
-            "SELECT id, nome, ativa FROM lojas ORDER BY id ASC",
-            conn,
-        )
+        df = pd.read_sql_query("SELECT id, nome, ativa FROM lojas ORDER BY id ASC", conn)
     return df
 
 
 def get_loja_nome(loja_id) -> str:
-    """
-    Mais robusto: aceita loja_id None/str/int sem quebrar.
-    """
     try:
         lid = int(loja_id)
     except Exception:
@@ -771,12 +738,8 @@ def get_loja_nome(loja_id) -> str:
         cur = conn.cursor()
         cur.execute("SELECT nome FROM lojas WHERE id = ?", (lid,))
         r = cur.fetchone()
-    # com row_factory, r["nome"]
     return str(r["nome"]) if r else f"Loja {lid}"
 
-
-# ✅ IMPORT (corrige NameError: date)
-from datetime import datetime, timedelta, date
 
 # =========================
 # Produtos (Estoque) — MULTI-LOJA
@@ -890,11 +853,9 @@ def baixar_estoque_por_codigo(loja_id: int, codigo: str, qtd: int):
 
 # =========================
 # Histórico (itens vendidos) — MULTI-LOJA
-# ✅ corrige NameError: listar_vendas_itens_df
 # =========================
 def listar_vendas_itens_df(loja_id: int, filtro_produto: str = ""):
     filtro = f"%{(filtro_produto or '').strip()}%"
-
     with conectar() as conn:
         df = pd.read_sql_query(
             """
@@ -1048,118 +1009,342 @@ def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: s
         "diferenca": diferenca,
         "fechado_em": agora,
     }
-# =========================================================
-# ✅ IMPORTANTE (evita NameError: date)
-# Coloque no TOPO do arquivo (junto dos imports):
-# from datetime import datetime, timedelta, date
-# =========================================================
 
 
-# =========================================================
-# ✅ GARANTIAS DE ESTADO (evita NameError: pagina/auth/cart)
-# Coloque ANTES desta seção (ou deixe aqui mesmo, acima do sidebar do caixa)
-# =========================================================
+# =========================
+# Vendas (registrar venda completa) — MULTI-LOJA
+# =========================
+def registrar_venda_completa_db(
+    loja_id: int,
+    sessao_id: int,
+    itens: list,
+    forma_pagamento: str,
+    subtotal: float,
+    desconto: float,
+    total: float,
+    recebido: float,
+    troco: float,
+    status: str = "FINALIZADA",
+    baixar_estoque: bool = True,
+) -> int:
+    if not itens:
+        raise RuntimeError("Carrinho vazio.")
+
+    with conectar() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+
+            cur.execute(
+                """
+                INSERT INTO vendas_cabecalho
+                (loja_id, datahora, sessao_id, subtotal, desconto, total, forma_pagamento, recebido, troco, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(loja_id),
+                    agora_iso(),
+                    int(sessao_id),
+                    float(subtotal or 0.0),
+                    float(desconto or 0.0),
+                    float(total or 0.0),
+                    str(forma_pagamento or "OUTRO"),
+                    float(recebido or 0.0),
+                    float(troco or 0.0),
+                    str(status or "FINALIZADA"),
+                ),
+            )
+            venda_id = int(cur.lastrowid)
+
+            for it in itens:
+                codigo = str(it.get("codigo", "")).strip()
+                produto = str(it.get("produto", "")).strip()
+                preco_unit = float(it.get("preco_unit", 0.0) or 0.0)
+                preco_custo = float(it.get("preco_custo", 0.0) or 0.0)
+                qtd = int(it.get("qtd", 0) or 0)
+                total_item = float(it.get("total_item", 0.0) or (preco_unit * qtd))
+
+                if qtd <= 0:
+                    raise RuntimeError("Quantidade inválida no carrinho.")
+
+                # baixa estoque dentro da mesma transação (garante consistência)
+                if baixar_estoque:
+                    cur.execute(
+                        """
+                        UPDATE produtos
+                        SET quantidade = quantidade - ?
+                        WHERE loja_id = ? AND codigo = ? AND quantidade >= ?
+                        """,
+                        (qtd, int(loja_id), codigo, qtd),
+                    )
+                    if cur.rowcount == 0:
+                        raise RuntimeError(f"Estoque insuficiente para o item: {produto} ({codigo})")
+
+                cur.execute(
+                    """
+                    INSERT INTO vendas_itens
+                    (loja_id, venda_id, codigo, produto, preco_unit, preco_custo, qtd, total_item)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (int(loja_id), venda_id, codigo, produto, preco_unit, preco_custo, qtd, total_item),
+                )
+
+            conn.commit()
+            return venda_id
+
+        except Exception:
+            conn.rollback()
+            raise
+
+
+# =========================
+# Cupom TXT (simples)
+# =========================
+def cupom_txt(itens: list, numero_venda: str, forma_ui: str, desconto: float, recebido: float, troco: float) -> str:
+    linhas = []
+    linhas.append("PDV Camargo Celulares")
+    linhas.append(f"Venda: {numero_venda}")
+    linhas.append(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    linhas.append("-" * 38)
+    for it in itens:
+        nome = str(it.get("produto", ""))[:28]
+        qtd = int(it.get("qtd", 0) or 0)
+        pu = float(it.get("preco_unit", 0.0) or 0.0)
+        tt = float(it.get("total_item", pu * qtd))
+        linhas.append(f"{nome}")
+        linhas.append(f"  {qtd} x {brl(pu)} = {brl(tt)}")
+    linhas.append("-" * 38)
+    subtotal = float(sum(float(i.get("total_item", 0.0) or 0.0) for i in itens))
+    total = max(0.0, subtotal - float(desconto or 0.0))
+    linhas.append(f"Subtotal: R$ {brl(subtotal)}")
+    linhas.append(f"Desconto: R$ {brl(desconto)}")
+    linhas.append(f"Total:    R$ {brl(total)}")
+    linhas.append(f"Pagamento: {forma_ui}")
+    if (forma_ui or "").strip().lower() == "dinheiro":
+        linhas.append(f"Recebido: R$ {brl(recebido)}")
+        linhas.append(f"Troco:    R$ {brl(troco)}")
+    linhas.append("-" * 38)
+    linhas.append("OBRIGADO! VOLTE SEMPRE :)")
+    return "\n".join(linhas)
+# =========================
+# Relatórios — MULTI-LOJA
+# =========================
+def listar_vendas_por_periodo_df(loja_id: int, dt_ini: datetime, dt_fim: datetime):
+    ini = dt_ini.strftime("%Y-%m-%d %H:%M:%S")
+    fim = dt_fim.strftime("%Y-%m-%d %H:%M:%S")
+    with conectar() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                id,
+                datahora,
+                subtotal,
+                desconto,
+                total,
+                forma_pagamento,
+                recebido,
+                troco,
+                status
+            FROM vendas_cabecalho
+            WHERE loja_id = ?
+              AND status = 'FINALIZADA'
+              AND datahora BETWEEN ? AND ?
+            ORDER BY datahora DESC, id DESC
+            """,
+            conn,
+            params=(int(loja_id), ini, fim),
+        )
+    return df
+
+
+def totais_por_dia_do_mes(loja_id: int, ano: int, mes: int):
+    # yyyy-mm
+    ym = f"{int(ano):04d}-{int(mes):02d}"
+    with conectar() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                substr(datahora, 1, 10) AS dia,
+                COALESCE(SUM(total), 0) AS total
+            FROM vendas_cabecalho
+            WHERE loja_id = ?
+              AND status = 'FINALIZADA'
+              AND substr(datahora, 1, 7) = ?
+            GROUP BY substr(datahora, 1, 10)
+            ORDER BY dia ASC
+            """,
+            conn,
+            params=(int(loja_id), ym),
+        )
+    total_mes = float(df["total"].sum()) if (df is not None and not df.empty and "total" in df.columns) else 0.0
+    return df, total_mes
+
+
+# =========================
+# UI (Streamlit) — ordem correta
+# =========================
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+
+# Inicializa banco e usuários
+inicializar_banco()
+inicializar_usuarios()
+
+# ✅ Estados globais (blindagem NameError)
 if "auth" not in st.session_state:
     st.session_state.auth = None
-
 if "cart" not in st.session_state:
     st.session_state.cart = []
-
 if "cupom_txt" not in st.session_state:
     st.session_state.cupom_txt = None
 if "cupom_nome" not in st.session_state:
     st.session_state.cupom_nome = None
 if "cupom_id" not in st.session_state:
     st.session_state.cupom_id = None
+if "loja_id_ativa" not in st.session_state:
+    st.session_state.loja_id_ativa = None
+if "pagina" not in st.session_state:
+    st.session_state.pagina = "🧾 Caixa (PDV)"
 
+st.title(APP_TITLE)
+st.caption(f"DB: {DB_PATH}")
+st.caption(f"Backup dir: {BACKUP_DIR} | Enabled: {BACKUP_ENABLED}")
+
+# =========================
+# Login
+# =========================
 auth = st.session_state.get("auth") or {}
 
-def _tipo_atual() -> str:
-    # aceita auth["tipo"] ou auth["role"]
-    t = (auth.get("tipo") or auth.get("role") or "").strip().lower()
-    if t == "admin" or t == "administrador":
+def _tipo_atual(a: dict) -> str:
+    t = (a.get("tipo") or a.get("role") or "").strip().lower()
+    if (a.get("role") or "").strip().upper() == "ADMIN":
         return "admin"
-    if t == "dono":
+    if (a.get("role") or "").strip().upper() == "DONO":
         return "dono"
-    if t == "operador":
-        return "operador"
-    if t == "admin".upper():
-        return "admin"
-    if (auth.get("role") or "").strip().upper() == "ADMIN":
-        return "admin"
-    if (auth.get("role") or "").strip().upper() == "DONO":
-        return "dono"
-    if (auth.get("role") or "").strip().upper() == "OPERADOR":
+    if (a.get("role") or "").strip().upper() == "OPERADOR":
         return "operador"
     return t or "operador"
 
-tipo = _tipo_atual()
+tipo = _tipo_atual(auth)
 
-# =========================================================
-# ✅ NAVEGAÇÃO (DEFINE "pagina" ANTES DE USAR)
-# Coloque isso ANTES do bloco "if pagina == ..."
-# =========================================================
+with st.sidebar:
+    st.header("🔐 Acesso")
+    if auth:
+        st.success(f"Logado: {auth.get('username','')} ({auth.get('role','')})")
+        if st.button("Sair"):
+            st.session_state.auth = None
+            st.session_state.cart = []
+            st.session_state.cupom_txt = None
+            st.session_state.cupom_nome = None
+            st.session_state.cupom_id = None
+            st.rerun()
+    else:
+        with st.form("login_form"):
+            u = st.text_input("Usuário", value="")
+            p = st.text_input("Senha", value="", type="password")
+            ok = st.form_submit_button("Entrar")
+        if ok:
+            user = autenticar(u, p)
+            if not user:
+                st.error("Usuário/senha inválidos ou usuário inativo.")
+            else:
+                st.session_state.auth = user
+                st.rerun()
+
+# Se não logou, para aqui (evita UI quebrar e evita NameError em loja/páginas)
+auth = st.session_state.get("auth") or {}
+if not auth:
+    st.info("Faça login para acessar o PDV.")
+    st.stop()
+
+tipo = _tipo_atual(auth)
+
+# =========================
+# Loja ativa (antes do caixa/páginas)
+# =========================
+def _to_int(v, default=1):
+    try:
+        return int(v)
+    except Exception:
+        return int(default)
+
+# Se dono/operador: força loja do usuário
+if tipo in ("dono", "operador") and auth.get("loja_id"):
+    st.session_state.loja_id_ativa = _to_int(auth.get("loja_id"), 1)
+
+# Se admin: pode escolher no sidebar
+if tipo == "admin":
+    try:
+        df_lojas = listar_lojas_df()
+        lojas_ativas = df_lojas[df_lojas["ativa"] == 1] if (df_lojas is not None and not df_lojas.empty) else df_lojas
+    except Exception:
+        lojas_ativas = None
+
+    with st.sidebar:
+        st.divider()
+        st.header("🏪 Loja")
+        if lojas_ativas is None or lojas_ativas.empty:
+            st.warning("Nenhuma loja encontrada.")
+        else:
+            opcoes = [(int(r["id"]), str(r["nome"])) for _, r in lojas_ativas.iterrows()]
+            ids = [x[0] for x in opcoes]
+            nomes = [f"{x[0]} — {x[1]}" for x in opcoes]
+
+            atual = st.session_state.loja_id_ativa
+            if atual is None or int(atual) not in ids:
+                st.session_state.loja_id_ativa = ids[0]
+
+            idx = ids.index(int(st.session_state.loja_id_ativa))
+            escolhido = st.selectbox("Selecione a loja", options=list(range(len(opcoes))), format_func=lambda i: nomes[i], index=idx)
+            st.session_state.loja_id_ativa = ids[int(escolhido)]
+
+# fallback geral
+if st.session_state.loja_id_ativa is None:
+    st.session_state.loja_id_ativa = _to_int(auth.get("loja_id", 1), 1)
+
+loja_id_ativa = _to_int(st.session_state.loja_id_ativa, 1)
+
+# =========================
+# Navegação (pagina definida ANTES de usar)
+# =========================
 paginas = ["🧾 Caixa (PDV)", "📦 Estoque", "📈 Histórico", "📅 Relatórios"]
 if tipo == "admin":
     paginas.append("👤 Usuários (Admin)")
 
-if "pagina" not in st.session_state:
-    st.session_state.pagina = "🧾 Caixa (PDV)"
-
 if st.session_state.pagina not in paginas:
     st.session_state.pagina = "🧾 Caixa (PDV)"
 
-pagina = st.sidebar.radio(
-    "Navegação",
-    paginas,
-    index=paginas.index(st.session_state.pagina),
-    key="pagina",
-)
+pagina = st.sidebar.radio("Navegação", paginas, index=paginas.index(st.session_state.pagina), key="pagina")
 
-# =========================================================
-# 1) SIDEBAR — CAIXA (Abertura/Fechamento) — sempre visível
-# =========================================================
+# =========================
+# Sidebar — Caixa (sempre visível, mas só funciona com loja_id_ativa válido)
+# =========================
 st.sidebar.divider()
 st.sidebar.header("💰 Caixa (Abertura/Fechamento)")
 
-# ✅ sempre recalcula a sessão da loja ativa
-try:
-    sess = get_sessao_aberta(loja_id_ativa)
-except Exception:
-    sess = None
-
 def _sess_get(sess_obj, key_or_index, default=None):
-    """
-    Lê sess tanto se for tuple (fetchone padrão) quanto sqlite3.Row/dict-like.
-    """
     if sess_obj is None:
         return default
     try:
-        # sqlite3.Row / dict-like
         if hasattr(sess_obj, "keys"):
-            return sess_obj.get(key_or_index, default) if isinstance(sess_obj, dict) else sess_obj[key_or_index]
+            return sess_obj[key_or_index]
     except Exception:
         pass
-    # tuple/list
     try:
         return sess_obj[key_or_index]
     except Exception:
         return default
 
+try:
+    sess = get_sessao_aberta(loja_id_ativa)
+except Exception:
+    sess = None
+
 if not sess:
     st.sidebar.error("CAIXA FECHADO")
 
     with st.sidebar.form("abrir_caixa"):
-        operador = st.text_input(
-            "Operador (opcional)",
-            value=(auth.get("username", "") if auth else "")
-        )
-        saldo_ini = st.number_input(
-            "Saldo inicial (fundo)",
-            min_value=0.0,
-            step=10.0,
-            format="%.2f"
-        )
+        operador = st.text_input("Operador (opcional)", value=(auth.get("username", "") if auth else ""))
+        saldo_ini = st.number_input("Saldo inicial (fundo)", min_value=0.0, step=10.0, format="%.2f")
         obs = st.text_input("Observação (opcional)", value="")
         ok = st.form_submit_button("🔓 Abrir Caixa")
 
@@ -1170,12 +1355,11 @@ if not sess:
             st.rerun()
         except Exception as e:
             st.sidebar.error(str(e))
-
 else:
-    sid = int(_sess_get(sess, "id", _sess_get(sess, 0, 0)) or 0)
-    aberto_em = _sess_get(sess, "aberto_em", _sess_get(sess, 1, ""))
-    saldo_ini = float(_sess_get(sess, "saldo_inicial", _sess_get(sess, 2, 0.0)) or 0.0)
-    operador = _sess_get(sess, "operador", _sess_get(sess, 3, "")) or ""
+    sid = int(_sess_get(sess, "id", 0) or 0)
+    aberto_em = _sess_get(sess, "aberto_em", "")
+    saldo_ini = float(_sess_get(sess, "saldo_inicial", 0.0) or 0.0)
+    operador = _sess_get(sess, "operador", "") or ""
 
     st.sidebar.success(f"ABERTO — Sessão #{sid}")
     st.sidebar.caption(f"Aberto em: {aberto_em}")
@@ -1194,21 +1378,13 @@ else:
         st.sidebar.dataframe(df_rel, use_container_width=True, hide_index=True)
 
     with st.sidebar.form("fechar_caixa"):
-        contado = st.number_input(
-            "Valor contado (informado)",
-            min_value=0.0,
-            step=10.0,
-            value=float(saldo_final_sistema),
-            format="%.2f",
-        )
+        contado = st.number_input("Valor contado (informado)", min_value=0.0, step=10.0, value=float(saldo_final_sistema), format="%.2f")
         obs_f = st.text_input("Observação (opcional)", value="")
         fechar = st.form_submit_button("🔒 Fechar Caixa")
 
     if fechar:
         try:
             res = fechar_caixa_db(loja_id_ativa, int(sid), float(contado), obs_f)
-
-            # ✅ backup no fechamento (não pode quebrar o app)
             try:
                 criar_backup_agora(prefix=f"pdv_close_loja{int(loja_id_ativa)}")
             except Exception:
@@ -1217,31 +1393,23 @@ else:
             st.sidebar.success("Caixa fechado!")
             st.sidebar.write(f"Diferença: **R$ {brl(res['diferenca'])}**")
 
-            # limpa estado
             st.session_state.cart = []
             st.session_state.cupom_txt = None
             st.session_state.cupom_nome = None
             st.session_state.cupom_id = None
-
             st.rerun()
         except Exception as e:
             st.sidebar.error(str(e))
 
-
-# =========================================================
-# 2) PÁGINAS — (Caixa / Estoque / Histórico / Usuários / Relatórios)
-# =========================================================
-
-# 🔁 Recarrega sessão do caixa sempre que trocar página/loja
+# =========================
+# PÁGINAS
+# =========================
 try:
     sess = get_sessao_aberta(loja_id_ativa)
 except Exception:
     sess = None
 
-
-# =========================
 # Página: Caixa (PDV)
-# =========================
 if pagina == "🧾 Caixa (PDV)":
     col1, col2 = st.columns([2.2, 1], gap="large")
 
@@ -1286,7 +1454,6 @@ if pagina == "🧾 Caixa (PDV)":
 
         if st.session_state.cart:
             df_cart = pd.DataFrame(st.session_state.cart)
-
             for col in ["codigo", "produto", "preco_unit", "qtd", "preco_custo", "total_item"]:
                 if col not in df_cart.columns:
                     df_cart[col] = 0
@@ -1312,7 +1479,6 @@ if pagina == "🧾 Caixa (PDV)":
                 preco = float(row.get("preco_unit", 0.0))
                 qtd_i = int(row.get("qtd", 1))
                 custo = float(df_cart.iloc[i].get("preco_custo", 0.0)) if i < len(df_cart) else 0.0
-
                 new_cart.append(
                     {
                         "codigo": str(row.get("codigo", "")),
@@ -1323,7 +1489,6 @@ if pagina == "🧾 Caixa (PDV)":
                         "total_item": preco * qtd_i,
                     }
                 )
-
             st.session_state.cart = new_cart
 
             subtotal = float(sum(i["total_item"] for i in st.session_state.cart))
@@ -1335,13 +1500,7 @@ if pagina == "🧾 Caixa (PDV)":
                     st.session_state.cart = []
                     st.rerun()
             with c2:
-                idx = st.number_input(
-                    "Remover item (nº)",
-                    min_value=1,
-                    max_value=len(st.session_state.cart),
-                    value=1,
-                    step=1,
-                )
+                idx = st.number_input("Remover item (nº)", min_value=1, max_value=len(st.session_state.cart), value=1, step=1)
             with c3:
                 if st.button("Remover"):
                     st.session_state.cart.pop(int(idx) - 1)
@@ -1355,20 +1514,11 @@ if pagina == "🧾 Caixa (PDV)":
         if not sess:
             st.info("Abra o caixa primeiro.")
         else:
-            sid = int(_sess_get(sess, "id", _sess_get(sess, 0, 0)) or 0)
+            sid = int(_sess_get(sess, "id", 0) or 0)
 
-            forma_ui = st.selectbox(
-                "Forma de pagamento",
-                ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"],
-                index=0
-            )
-
+            forma_ui = st.selectbox("Forma de pagamento", ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"], index=0)
             desconto_txt = st.text_input("Desconto (R$)", value="0")
-            recebido_txt = st.text_input(
-                "Recebido (somente dinheiro)",
-                value="0",
-                disabled=(forma_ui != "Dinheiro")
-            )
+            recebido_txt = st.text_input("Recebido (somente dinheiro)", value="0", disabled=(forma_ui != "Dinheiro"))
 
             df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
             subtotal = float(df_cart["total_item"].sum()) if (not df_cart.empty and "total_item" in df_cart.columns) else 0.0
@@ -1389,55 +1539,49 @@ if pagina == "🧾 Caixa (PDV)":
             if st.button("✅ FINALIZAR"):
                 if not st.session_state.cart:
                     st.error("Carrinho vazio.")
-                else:
-                    for it in st.session_state.cart:
-                        prod = buscar_produto_por_codigo(loja_id_ativa, it["codigo"])
-                        if not prod:
-                            st.error(f"Produto {it['codigo']} não encontrado no estoque desta loja.")
-                            st.stop()
-                        if int(it["qtd"]) > int(prod.get("quantidade", 0)):
-                            st.error(f"Estoque insuficiente para {it['produto']}.")
-                            st.stop()
+                    st.stop()
 
-                    if forma_ui == "Dinheiro" and recebido < total_liq:
-                        st.error("Valor recebido menor que o total com desconto.")
+                for it in st.session_state.cart:
+                    prod = buscar_produto_por_codigo(loja_id_ativa, it["codigo"])
+                    if not prod:
+                        st.error(f"Produto {it['codigo']} não encontrado no estoque desta loja.")
+                        st.stop()
+                    if int(it["qtd"]) > int(prod.get("quantidade", 0)):
+                        st.error(f"Estoque insuficiente para {it['produto']}.")
                         st.stop()
 
-                    forma_db = map_forma_pagamento(forma_ui)
+                if forma_ui == "Dinheiro" and recebido < total_liq:
+                    st.error("Valor recebido menor que o total com desconto.")
+                    st.stop()
 
-                    try:
-                        venda_id = registrar_venda_completa_db(
-                            loja_id=loja_id_ativa,
-                            sessao_id=int(sid),
-                            itens=st.session_state.cart,
-                            forma_pagamento=forma_db,
-                            subtotal=subtotal,
-                            desconto=float(desconto),
-                            total=total_liq,
-                            recebido=float(recebido),
-                            troco=float(troco),
-                            status="FINALIZADA",
-                            baixar_estoque=True,
-                        )
-                    except Exception as e:
-                        st.error(f"Erro ao registrar venda: {e}")
-                        st.stop()
+                forma_db = map_forma_pagamento(forma_ui)
 
-                    numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
-                    txt = cupom_txt(
-                        st.session_state.cart,
-                        numero_venda,
-                        forma_ui,
-                        float(desconto),
-                        float(recebido),
-                        float(troco),
+                try:
+                    venda_id = registrar_venda_completa_db(
+                        loja_id=loja_id_ativa,
+                        sessao_id=int(sid),
+                        itens=st.session_state.cart,
+                        forma_pagamento=forma_db,
+                        subtotal=subtotal,
+                        desconto=float(desconto),
+                        total=total_liq,
+                        recebido=float(recebido),
+                        troco=float(troco),
+                        status="FINALIZADA",
+                        baixar_estoque=True,
                     )
+                except Exception as e:
+                    st.error(f"Erro ao registrar venda: {e}")
+                    st.stop()
 
-                    st.session_state.cupom_txt = txt
-                    st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
-                    st.session_state.cupom_id = venda_id
-                    st.session_state.cart = []
-                    st.rerun()
+                numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
+                txt = cupom_txt(st.session_state.cart, numero_venda, forma_ui, float(desconto), float(recebido), float(troco))
+
+                st.session_state.cupom_txt = txt
+                st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
+                st.session_state.cupom_id = venda_id
+                st.session_state.cart = []
+                st.rerun()
 
             if st.session_state.cupom_txt:
                 st.divider()
@@ -1455,13 +1599,9 @@ if pagina == "🧾 Caixa (PDV)":
                     st.session_state.cupom_id = None
                     st.rerun()
 
-
-# =========================
 # Página: Estoque
-# =========================
 elif pagina == "📦 Estoque":
     st.subheader(f"📦 Estoque — {get_loja_nome(loja_id_ativa)}")
-
     cA, cB = st.columns([1, 1], gap="large")
 
     with cA:
@@ -1527,17 +1667,9 @@ elif pagina == "📦 Estoque":
         df_show["preco_venda"] = df_show["preco_venda"].map(lambda x: f"R$ {brl(x)}")
         st.dataframe(df_show, use_container_width=True, hide_index=True)
 
-
-# =========================
 # Página: Histórico
-# =========================
 elif pagina == "📈 Histórico":
     st.subheader(f"📈 Histórico de Vendas (itens) — {get_loja_nome(loja_id_ativa)}")
-
-    if "listar_vendas_itens_df" not in globals():
-        st.error("Função listar_vendas_itens_df() não existe no arquivo. Cole também a função de Histórico.")
-        st.stop()
-
     filtro = st.text_input("Filtrar por produto (contém)", value="")
     df = listar_vendas_itens_df(loja_id_ativa, filtro_produto=filtro)
 
@@ -1552,17 +1684,9 @@ elif pagina == "📈 Histórico":
         df_show["total_item"] = df_show["total_item"].map(lambda x: f"R$ {brl(x)}")
         st.dataframe(df_show, use_container_width=True, hide_index=True)
 
-
-# =========================
 # Página: Relatórios
-# =========================
 elif pagina == "📅 Relatórios":
     st.subheader(f"📅 Relatórios — {get_loja_nome(loja_id_ativa)}")
-
-    missing = [fn for fn in ["listar_vendas_por_periodo_df", "totais_por_dia_do_mes"] if fn not in globals()]
-    if missing:
-        st.error(f"Faltam funções no arquivo: {', '.join(missing)}. Cole também as funções de Relatórios.")
-        st.stop()
 
     st.markdown("### Vendas por período (por cupom)")
     c1, c2 = st.columns(2)
@@ -1597,10 +1721,7 @@ elif pagina == "📅 Relatórios":
         dfd_show["total"] = dfd_show["total"].map(lambda x: f"R$ {brl(x)}")
         st.dataframe(dfd_show, use_container_width=True, hide_index=True)
 
-
-# =========================
 # Página: Usuários (Admin)
-# =========================
 elif pagina == "👤 Usuários (Admin)":
     if tipo != "admin":
         st.error("Acesso negado. Apenas ADMIN pode acessar Usuários.")
@@ -1608,3 +1729,22 @@ elif pagina == "👤 Usuários (Admin)":
 
     st.subheader("👤 Usuários (Admin)")
     st.dataframe(listar_usuarios_df(), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("### Criar novo usuário")
+    with st.form("novo_usuario"):
+        nu = st.text_input("Username", value="")
+        nn = st.text_input("Nome", value="")
+        nr = st.selectbox("Role", ["ADMIN", "DONO", "OPERADOR"], index=2)
+        nl = st.number_input("Loja ID (DONO/OPERADOR)", min_value=1, step=1, value=int(loja_id_ativa))
+        ns = st.text_input("Senha", value="", type="password")
+        na = st.checkbox("Ativo", value=True)
+        criar = st.form_submit_button("Criar")
+
+    if criar:
+        try:
+            criar_usuario(nu, nn, nr, ns, loja_id=(None if nr == "ADMIN" else int(nl)), ativo=(1 if na else 0))
+            st.success("Usuário criado!")
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
