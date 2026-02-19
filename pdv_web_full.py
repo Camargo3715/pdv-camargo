@@ -1064,7 +1064,15 @@ if not sess:
     st.sidebar.error("CAIXA FECHADO")
 
     with st.sidebar.form("abrir_caixa"):
-        operador = st.text_input("Operador (opcional)", value=auth.get("username", "") if auth else "")
+        operador = st.text_input(
+    "Operador (opcional)",
+    value=(
+        st.session_state.auth.get("username", "")
+        if st.session_state.get("auth")
+        else ""
+    )
+)
+
         saldo_ini = st.number_input("Saldo inicial (fundo)", min_value=0.0, step=10.0, format="%.2f")
         obs = st.text_input("Observação (opcional)", value="")
         ok = st.form_submit_button("🔓 Abrir Caixa")
