@@ -920,217 +920,222 @@ def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: s
         "fechado_em": agora,
     }
 
-
 # =========================
-# Vendas — MULTI-LOJA
+# Página: Caixa (PDV)
 # =========================
-def registrar_venda_completa_db(
-    loja_id: int,
-    sessao_id: int,
-    itens: list,
-    forma_pagamento: str,
-    subtotal: float,
-    desconto: float,
-    total: float,
-    recebido: float,
-    troco: float,
-    status: str = "FINALIZADA",
-    baixar_estoque: bool = False,  # ✅ opcional: modo transacional total
-) -> int:
-    with conectar() as conn:
-        cur = conn.cursor()
+if pagina.startswith("🧾"):
+    col1, col2 = st.columns([2.2, 1], gap="large")
 
-        # segurança: sessão pertence à loja e está aberta
-        cur.execute(
-            "SELECT id FROM caixa_sessoes WHERE id = ? AND loja_id = ? AND status='ABERTO'",
-            (int(sessao_id), int(loja_id)),
-        )
-        if not cur.fetchone():
-            raise RuntimeError("Sessão de caixa inválida para esta loja (ou não está ABERTA).")
+    with col1:
+        st.subheader(f"🧾 Caixa — {get_loja_nome(loja_id_ativa)}")
+        st.caption("Lançar item por código")
 
-        cur.execute("BEGIN IMMEDIATE")
+        if not sess:
+            st.info("Abra o caixa na barra lateral para vender.")
+        else:
+            with st.form("add_item", clear_on_submit=True):
+                codigo = st.text_input("Código", placeholder="Bipe o código / digite e Enter")
+                qtd = st.number_input("Quantidade", min_value=1, step=1, value=1)
+                add = st.form_submit_button("Adicionar")
+            if add:
+                prod = buscar_produto_por_codigo(loja_id_ativa, codigo)
+                if not prod:
+                    st.error("Produto não encontrado pelo código (nesta loja).")
+                else:
+                    qtd = int(qtd)
+                    if qtd > prod["quantidade"]:
+                        st.error("Quantidade excede o estoque disponível.")
+                    else:
+                        st.session_state.cart.append(
+                            {
+                                "codigo": prod["codigo"],
+                                "produto": prod["nome"],
+                                "preco_unit": float(prod["preco_venda"]),
+                                "preco_custo": float(prod["preco_custo"]),
+                                "qtd": int(qtd),
+                                "total_item": float(prod["preco_venda"]) * int(qtd),
+                            }
+                        )
+                        st.success("Item adicionado!")
 
-        cur.execute(
-            """
-            INSERT INTO vendas_cabecalho
-                (loja_id, datahora, sessao_id, subtotal, desconto, total, forma_pagamento, recebido, troco, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(loja_id),
-                agora_iso(),
-                int(sessao_id),
-                float(subtotal or 0.0),
-                float(desconto or 0.0),
-                float(total or 0.0),
-                str(forma_pagamento),
-                float(recebido or 0.0),
-                float(troco or 0.0),
-                str(status),
-            ),
-        )
-        venda_id = int(cur.lastrowid)
+        st.subheader("Carrinho (editável)")
 
-        for it in itens:
-            codigo = str(it.get("codigo") or "").strip()
-            qtd = int(it.get("qtd") or 0)
+        if st.session_state.cart:
+            df_cart = pd.DataFrame(st.session_state.cart)
+            df_edit = df_cart[["codigo", "produto", "preco_unit", "qtd"]].copy()
 
-            cur.execute(
-                """
-                INSERT INTO vendas_itens
-                    (loja_id, venda_id, codigo, produto, preco_unit, preco_custo, qtd, total_item)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(loja_id),
-                    venda_id,
-                    codigo,
-                    str(it.get("produto") or ""),
-                    float(it.get("preco_unit") or 0.0),
-                    float(it.get("preco_custo") or 0.0),
-                    qtd,
-                    float(it.get("total_item") or 0.0),
-                ),
+            edited = st.data_editor(
+                df_edit,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                disabled=["codigo", "produto"],
+                column_config={
+                    "preco_unit": st.column_config.NumberColumn("Preço unit.", min_value=0.0, step=0.5),
+                    "qtd": st.column_config.NumberColumn("Qtd", min_value=1, step=1),
+                },
+                key="cart_editor",
             )
 
-            # ✅ opcional: baixa estoque dentro da mesma transação da venda
-            if baixar_estoque and codigo and qtd > 0:
-                cur.execute(
-                    """
-                    UPDATE produtos
-                    SET quantidade = quantidade - ?
-                    WHERE loja_id = ? AND codigo = ? AND quantidade >= ?
-                    """,
-                    (qtd, int(loja_id), codigo, qtd),
+            # aplicar edições
+            new_cart = []
+            for i in range(len(edited)):
+                row = edited.iloc[i].to_dict()
+                preco = float(row["preco_unit"])
+                qtd = int(row["qtd"])
+                custo = float(df_cart.iloc[i]["preco_custo"]) if "preco_custo" in df_cart.columns else 0.0
+                new_cart.append(
+                    {
+                        "codigo": str(row["codigo"]),
+                        "produto": str(row["produto"]),
+                        "preco_unit": preco,
+                        "preco_custo": custo,
+                        "qtd": qtd,
+                        "total_item": preco * qtd,
+                    }
                 )
-                if cur.rowcount == 0:
-                    conn.rollback()
-                    raise RuntimeError(f"Estoque insuficiente para o código {codigo}.")
+            st.session_state.cart = new_cart
 
-        conn.commit()
-        return venda_id
+            subtotal = float(sum(i["total_item"] for i in st.session_state.cart))
+            st.metric("Subtotal", f"R$ {brl(subtotal)}")
 
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("Limpar carrinho"):
+                    st.session_state.cart = []
+                    st.rerun()
+            with c2:
+                idx = st.number_input(
+                    "Remover item (nº)",
+                    min_value=1,
+                    max_value=len(st.session_state.cart),
+                    value=1,
+                    step=1,
+                )
+            with c3:
+                if st.button("Remover"):
+                    st.session_state.cart.pop(int(idx) - 1)
+                    st.rerun()
+        else:
+            st.caption("Carrinho vazio.")
 
-def listar_vendas_itens_df(loja_id: int, filtro_produto: str = ""):
-    filtro = (filtro_produto or "").strip().lower()
-    with conectar() as conn:
-        df = pd.read_sql_query(
-            """
-            SELECT
-                c.datahora as datahora,
-                i.codigo as codigo,
-                i.produto as produto,
-                i.preco_unit as preco_unit,
-                i.qtd as qtd,
-                i.total_item as total_item
-            FROM vendas_itens i
-            JOIN vendas_cabecalho c ON c.id = i.venda_id
-            WHERE c.loja_id = ? AND i.loja_id = ? AND c.status='FINALIZADA'
-            ORDER BY c.id DESC, i.id ASC
-            """,
-            conn,
-            params=(int(loja_id), int(loja_id)),
-        )
-    if filtro and not df.empty:
-        df = df[df["produto"].astype(str).str.lower().str.contains(filtro, na=False)]
-    return df
+    with col2:
+        st.subheader("Finalizar venda")
 
+        if not sess:
+            st.info("Abra o caixa primeiro.")
+        else:
+            sid, *_ = sess
+            forma_ui = st.selectbox("Forma de pagamento", ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"], index=0)
 
-def listar_vendas_por_periodo_df(loja_id: int, data_ini: datetime, data_fim: datetime):
-    ini = data_ini.strftime("%Y-%m-%d %H:%M:%S")
-    fim = data_fim.strftime("%Y-%m-%d %H:%M:%S")
-    with conectar() as conn:
-        df = pd.read_sql_query(
-            """
-            SELECT
-                c.datahora as datahora,
-                c.id as cupom,
-                COALESCE(SUM(i.qtd), 0) as itens,
-                c.total as total
-            FROM vendas_cabecalho c
-            LEFT JOIN vendas_itens i ON i.venda_id = c.id AND i.loja_id = c.loja_id
-            WHERE c.loja_id = ?
-              AND c.status='FINALIZADA'
-              AND datetime(c.datahora) BETWEEN datetime(?) AND datetime(?)
-            GROUP BY c.id, c.datahora, c.total
-            ORDER BY datetime(c.datahora) DESC
-            """,
-            conn,
-            params=(int(loja_id), ini, fim),
-        )
-    return df
+            desconto_txt = st.text_input("Desconto (R$)", value="0")
+            recebido_txt = st.text_input("Recebido (somente dinheiro)", value="0", disabled=(forma_ui != "Dinheiro"))
 
+            df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
+            subtotal = float(df_cart["total_item"].sum()) if not df_cart.empty else 0.0
 
-def totais_por_dia_do_mes(loja_id: int, ano: int, mes: int):
-    primeiro = datetime(ano, mes, 1, 0, 0, 0)
-    if mes == 12:
-        prox = datetime(ano + 1, 1, 1, 0, 0, 0)
-    else:
-        prox = datetime(ano, mes + 1, 1, 0, 0, 0)
+            desconto = to_float(desconto_txt)
+            if desconto < 0:
+                desconto = 0.0
+            if desconto > subtotal:
+                desconto = subtotal  # ✅ não deixa passar do subtotal
 
-    ini = primeiro.strftime("%Y-%m-%d %H:%M:%S")
-    fim = (prox - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+            total_liq = max(0.0, subtotal - float(desconto))
 
-    with conectar() as conn:
-        df = pd.read_sql_query(
-            """
-            SELECT date(datahora) as dia, COALESCE(SUM(total), 0) as total
-            FROM vendas_cabecalho
-            WHERE loja_id = ?
-              AND status='FINALIZADA'
-              AND datetime(datahora) BETWEEN datetime(?) AND datetime(?)
-            GROUP BY date(datahora)
-            ORDER BY date(datahora)
-            """,
-            conn,
-            params=(int(loja_id), ini, fim),
-        )
-    total_mes = float(df["total"].sum()) if not df.empty else 0.0
-    return df, total_mes
+            recebido = to_float(recebido_txt) if forma_ui == "Dinheiro" else 0.0
+            troco = max(0.0, recebido - total_liq) if forma_ui == "Dinheiro" else 0.0
 
-# =========================
-# Admin: Zerar dados de uma loja (estoque/vendas/caixa)
-# =========================
-def zerar_loja(loja_id: int):
-    """
-    Zera APENAS os dados da loja informada:
-    - produtos (estoque)
-    - vendas (cabecalho + itens)
-    - caixa_sessoes
-    Não mexe em usuários e não afeta outras lojas.
+            st.write(f"Total: **R$ {brl(subtotal)}**")
+            st.write(f"Desconto: **R$ {brl(desconto)}**")
+            st.write(f"Total a pagar: **R$ {brl(total_liq)}**")
+            if forma_ui == "Dinheiro":
+                st.write(f"Troco: **R$ {brl(troco)}**")
 
-    Segurança:
-    - não permite zerar se houver caixa ABERTO na loja
-    - ✅ faz backup automático antes de zerar
-    """
-    # segurança: não zerar com caixa aberto
-    if get_sessao_aberta(int(loja_id)):
-        raise RuntimeError("Não é possível zerar: existe CAIXA ABERTO nesta loja. Feche o caixa antes.")
+            # ✅ Cupom persistente (não some)
+            if "cupom_txt" not in st.session_state:
+                st.session_state.cupom_txt = None
+            if "cupom_nome" not in st.session_state:
+                st.session_state.cupom_nome = None
+            if "cupom_id" not in st.session_state:
+                st.session_state.cupom_id = None
 
-    # ✅ backup antes de ação destrutiva
-    try:
-        criar_backup_agora(prefix="pdv_before_reset")
-    except Exception:
-        pass
+            if st.button("✅ FINALIZAR"):
+                if not st.session_state.cart:
+                    st.error("Carrinho vazio.")
+                else:
+                    # valida estoque (por loja) antes de gravar
+                    for it in st.session_state.cart:
+                        prod = buscar_produto_por_codigo(loja_id_ativa, it["codigo"])
+                        if not prod:
+                            st.error(f"Produto {it['codigo']} não encontrado no estoque desta loja.")
+                            st.stop()
+                        if int(it["qtd"]) > int(prod["quantidade"]):
+                            st.error(f"Estoque insuficiente para {it['produto']}.")
+                            st.stop()
 
-    with conectar() as conn:
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
+                    if forma_ui == "Dinheiro" and recebido < total_liq:
+                        st.error("Valor recebido menor que o total com desconto.")
+                        st.stop()
 
-        # Itens primeiro (FK)
-        cur.execute("DELETE FROM vendas_itens WHERE loja_id = ?", (int(loja_id),))
-        cur.execute("DELETE FROM vendas_cabecalho WHERE loja_id = ?", (int(loja_id),))
-        cur.execute("DELETE FROM caixa_sessoes WHERE loja_id = ?", (int(loja_id),))
-        cur.execute("DELETE FROM produtos WHERE loja_id = ?", (int(loja_id),))
+                    forma_db = map_forma_pagamento(forma_ui)
 
-        # Tabela "vendas" legada (se existir)
-        try:
-            cur.execute("DELETE FROM vendas WHERE loja_id = ?", (int(loja_id),))
-        except Exception:
-            pass
+                    # ✅ venda + itens + baixa estoque (1 transação)
+                    try:
+                        venda_id = registrar_venda_completa_db(
+                            loja_id=loja_id_ativa,
+                            sessao_id=int(sid),
+                            itens=st.session_state.cart,
+                            forma_pagamento=forma_db,
+                            subtotal=subtotal,
+                            desconto=float(desconto),
+                            total=total_liq,
+                            recebido=float(recebido),
+                            troco=float(troco),
+                            status="FINALIZADA",
+                            baixar_estoque=True,
+                        )
+                    except Exception as e:
+                        st.error(f"Erro ao registrar venda: {e}")
+                        st.stop()
 
-        conn.commit()
+                    numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{venda_id:06d}"
+                    txt = cupom_txt(
+                        st.session_state.cart,
+                        numero_venda,
+                        forma_ui,
+                        float(desconto),
+                        float(recebido),
+                        float(troco),
+                    )
 
+                    st.session_state.cupom_txt = txt
+                    st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
+                    st.session_state.cupom_id = venda_id
+
+                    # limpa carrinho
+                    st.session_state.cart = []
+
+                    st.success("Venda registrada com sucesso!")
+
+            # ✅ Exibe cupom sempre (fora do botão)
+            if st.session_state.cupom_txt:
+                st.divider()
+                st.success(f"🧾 Cupom/ID: {st.session_state.cupom_id}")
+
+                st.text_area("Cupom gerado", value=st.session_state.cupom_txt, height=420)
+
+                st.download_button(
+                    "⬇️ Baixar Cupom TXT",
+                    data=st.session_state.cupom_txt.encode("utf-8"),
+                    file_name=st.session_state.cupom_nome or "cupom.txt",
+                    mime="text/plain",
+                )
+
+                if st.button("🆕 Nova venda (limpar cupom)"):
+                    st.session_state.cupom_txt = None
+                    st.session_state.cupom_nome = None
+                    st.session_state.cupom_id = None
+                    st.rerun()
 
 # =========================
 # Cupom (TXT para download)
@@ -1546,7 +1551,7 @@ if pagina.startswith("🧾"):
             if desconto < 0:
                 desconto = 0.0
             if desconto > subtotal:
-                desconto = subtotal  # ✅ não deixa passar do subtotal
+                desconto = subtotal  # não deixa passar do subtotal
 
             total_liq = max(0.0, subtotal - float(desconto))
 
@@ -1558,6 +1563,14 @@ if pagina.startswith("🧾"):
             st.write(f"Total a pagar: **R$ {brl(total_liq)}**")
             if forma_ui == "Dinheiro":
                 st.write(f"Troco: **R$ {brl(troco)}**")
+
+            # ✅ Guarda cupom na sessão pra não sumir ao recarregar
+            if "cupom_txt" not in st.session_state:
+                st.session_state.cupom_txt = None
+            if "cupom_nome" not in st.session_state:
+                st.session_state.cupom_nome = None
+            if "cupom_id" not in st.session_state:
+                st.session_state.cupom_id = None
 
             if st.button("✅ FINALIZAR"):
                 if not st.session_state.cart:
@@ -1579,7 +1592,7 @@ if pagina.startswith("🧾"):
 
                     forma_db = map_forma_pagamento(forma_ui)
 
-                    # ✅ MODO PROFISSIONAL: venda + itens + baixa estoque (tudo em 1 transação)
+                    # ✅ venda + itens + baixa estoque (1 transação)
                     try:
                         venda_id = registrar_venda_completa_db(
                             loja_id=loja_id_ativa,
@@ -1608,17 +1621,35 @@ if pagina.startswith("🧾"):
                         float(troco),
                     )
 
-                    st.success(f"Venda registrada! Cupom/ID: {venda_id}")
-                    st.download_button(
-                        "⬇️ Baixar Cupom TXT",
-                        data=txt.encode("utf-8"),
-                        file_name=f"cupom_{numero_venda}.txt",
-                        mime="text/plain",
-                    )
+                    # ✅ salva o cupom no session_state (pra aparecer e não sumir)
+                    st.session_state.cupom_txt = txt
+                    st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
+                    st.session_state.cupom_id = venda_id
 
+                    # limpa carrinho
                     st.session_state.cart = []
+
+                    # força recarregar pra mostrar cupom limpo + carrinho vazio
                     st.rerun()
 
+            # ✅ Exibe cupom (se existir)
+            if st.session_state.cupom_txt:
+                st.success(f"Venda registrada! Cupom/ID: {st.session_state.cupom_id}")
+
+                st.text_area("Cupom gerado", value=st.session_state.cupom_txt, height=420)
+
+                st.download_button(
+                    "⬇️ Baixar Cupom TXT",
+                    data=st.session_state.cupom_txt.encode("utf-8"),
+                    file_name=st.session_state.cupom_nome or "cupom.txt",
+                    mime="text/plain",
+                )
+
+                if st.button("🆕 Nova venda (limpar cupom)"):
+                    st.session_state.cupom_txt = None
+                    st.session_state.cupom_nome = None
+                    st.session_state.cupom_id = None
+                    st.rerun()
 
 # =========================
 # Página: Estoque (ADMIN/DONO/OPERADOR)
