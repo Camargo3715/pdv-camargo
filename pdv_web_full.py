@@ -1139,33 +1139,34 @@ if role == "ADMIN":
         st.sidebar.caption("Não foi possível listar backups.")
 
 # =========================
-# Navegação por perfil
+# Navegação por perfil (FIX — não some mais)
 # =========================
-paginas = ["🧾 Caixa (PDV)", "📈 Histórico"]
+role = (st.session_state.auth.get("role") if st.session_state.get("auth") else None) or "OPERADOR"
+role = str(role).strip().upper()
 
-if role in ("ADMIN", "DONO", "OPERADOR"):
-    paginas.insert(1, "📦 Estoque")
-    paginas.append("📅 Relatórios")
+# ✅ páginas base sempre disponíveis (logado)
+paginas = ["🧾 Caixa (PDV)", "📈 Histórico", "📦 Estoque", "📅 Relatórios"]
 
+# ✅ só ADMIN vê usuários
 if role == "ADMIN":
     paginas.append("👤 Usuários (Admin)")
 
-# ✅ estado da navegação (sem NameError)
+# ✅ estado da navegação (sem NameError / sem “sumir página”)
 if "pagina" not in st.session_state:
-    st.session_state.pagina = paginas[0]
+    st.session_state.pagina = "🧾 Caixa (PDV)"
 
 if st.session_state.pagina not in paginas:
-    st.session_state.pagina = paginas[0]
+    st.session_state.pagina = "🧾 Caixa (PDV)"
 
 pagina = st.sidebar.radio(
     "Navegação",
     paginas,
     index=paginas.index(st.session_state.pagina),
-    key="pagina"
+    key="pagina",
 )
 
 # =========================
-# Cupom (TXT para download) — DEFINIR ANTES DA UI
+# Cupom (TXT para download) — DEFINIR ANTES DA UI DAS PÁGINAS
 # =========================
 def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float, recebido: float, troco: float):
     largura = 40
@@ -1236,7 +1237,7 @@ def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float
     return "\n".join([l for l in out if l is not None])
 
 # =========================
-# Registrar venda completa — DEFINIR ANTES DA UI
+# Registrar venda completa — DEFINIR ANTES DA PÁGINA CAIXA
 # =========================
 def registrar_venda_completa_db(
     loja_id: int,
@@ -1278,7 +1279,6 @@ def registrar_venda_completa_db(
                 str(status),
             ),
         )
-
         venda_id = int(cur.lastrowid)
 
         for it in itens:
