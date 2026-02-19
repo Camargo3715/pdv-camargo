@@ -116,7 +116,6 @@ def sqlite_backup_seguro(db_path: str, backup_path: str):
     try:
         src = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         src.execute("PRAGMA foreign_keys = ON;")
-        # WAL melhora concorrência (Streamlit abre/conecta várias vezes)
         src.execute("PRAGMA journal_mode=WAL;")
 
         dst = sqlite3.connect(backup_path, check_same_thread=False, timeout=30)
@@ -247,25 +246,19 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     has_qtd = "quantidade" in cols
 
     # Legado CSV/primeiros modelos:
-    # ["Produto", "Preço", "Quantidade"] ou similares
     legacy_prod = "Produto" in cols
     legacy_preco = "Preço" in cols or "Preco" in cols
     legacy_qtd = "Quantidade" in cols
 
-    # Se não dá pra entender o formato antigo, não migra (evita quebrar o app)
     if not ((has_codigo and has_nome and has_pv and has_qtd) or (legacy_prod and legacy_preco and legacy_qtd)):
         return
 
-    # Lê os dados do formato atual/legado
     rows = []
     try:
         if has_codigo:
-            # formato mais novo sem loja_id
             cur.execute("SELECT id, codigo, nome, preco_custo, preco_venda, quantidade FROM produtos")
             rows = cur.fetchall()
         else:
-            # formato bem antigo: sem codigo e sem custo
-            # cria um "codigo" baseado no id (ou nome) para não perder produto
             col_preco = "Preço" if "Preço" in cols else ("Preco" if "Preco" in cols else None)
             if col_preco is None:
                 return
@@ -276,7 +269,6 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     except Exception:
         return
 
-    # Rebuild seguro
     conn.execute("""
     CREATE TABLE IF NOT EXISTS produtos_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,24 +308,48 @@ def conectar():
     ✅ Ajustes:
     - timeout maior (evita "database is locked")
     - WAL melhora concorrência no Streamlit/Render
+    - row_factory para retornar dicionário (sqlite3.Row)
     """
     global DB_PATH
     try:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA journal_mode=WAL;")
         return conn
     except sqlite3.OperationalError:
-        # fallback final (Render Free)
         DB_PATH = "/tmp/pdv.db"
         try:
             os.makedirs("/tmp", exist_ok=True)
         except Exception:
             pass
         conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA journal_mode=WAL;")
         return conn
+
+
+def executar_query(sql: str, params: tuple = ()):
+    """
+    SELECT -> retorna lista de dict-like (sqlite3.Row).
+    """
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        return rows
+
+
+def executar_exec(sql: str, params: tuple = ()):
+    """
+    INSERT/UPDATE/DELETE -> retorna lastrowid quando fizer sentido.
+    """
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        conn.commit()
+        return cur.lastrowid
 
 
 def inicializar_banco():
@@ -452,13 +468,14 @@ def inicializar_banco():
 
         conn.commit()
 
-    # ✅ Auto-backup diário (fora do with, pra não conflitar com a conexão ativa)
+    # ✅ Auto-backup diário
     auto_backup_se_precisar(prefix="pdv")
-
 
 # =========================
 # Usuários / Auth (Login)
 # =========================
+from typing import Optional
+
 def gerar_hash_senha(senha: str) -> tuple[str, str]:
     """
     PBKDF2-HMAC SHA256 com salt aleatório.
@@ -475,6 +492,15 @@ def verificar_senha(senha: str, salt_hex: str, hash_hex: str) -> bool:
     salt = bytes.fromhex(salt_hex)
     dk = hashlib.pbkdf2_hmac("sha256", senha_b, salt, 120_000)
     return dk.hex() == (hash_hex or "")
+
+
+def role_to_tipo(role: str) -> str:
+    r = (role or "").strip().upper()
+    if r == "ADMIN":
+        return "admin"
+    if r == "DONO":
+        return "dono"
+    return "operador"
 
 
 def inicializar_usuarios():
@@ -519,8 +545,8 @@ def inicializar_usuarios():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_loja ON usuarios(loja_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_ativo ON usuarios(ativo)")
 
-        cur.execute("SELECT COUNT(*) FROM usuarios")
-        total = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(*) AS total FROM usuarios")
+        total = int((cur.fetchone()["total"] or 0))
 
         if total == 0:
             admin_user = (os.getenv("ADMIN_USER") or "admin").strip().lower()
@@ -541,6 +567,7 @@ def get_usuario(username: str):
     u = (username or "").strip().lower()
     if not u:
         return None
+
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -557,14 +584,15 @@ def get_usuario(username: str):
         return None
 
     return {
-        "id": int(row[0]),
-        "username": str(row[1]),
-        "nome": str(row[2] or ""),
-        "role": str(row[3]),
-        "loja_id": (int(row[4]) if row[4] is not None else None),
-        "salt": str(row[5]),
-        "hash": str(row[6]),
-        "ativo": int(row[7] or 0),
+        "id": int(row["id"]),
+        "username": str(row["username"]),
+        "nome": str(row["nome"] or ""),
+        "role": str(row["role"]),
+        "tipo": role_to_tipo(str(row["role"])),
+        "loja_id": (int(row["loja_id"]) if row["loja_id"] is not None else None),
+        "salt": str(row["pass_salt"]),
+        "hash": str(row["pass_hash"]),
+        "ativo": int(row["ativo"] or 0),
     }
 
 
@@ -590,11 +618,10 @@ def listar_usuarios_df():
             conn,
         )
 
+
 # =========================
 # Usuários (CRUD)
 # =========================
-from typing import Optional
-
 def criar_usuario(username: str, nome: str, role: str, senha: str, loja_id: Optional[int] = None, ativo: int = 1):
     username = (username or "").strip().lower()
     nome = (nome or "").strip()
@@ -688,11 +715,9 @@ def to_float(txt) -> float:
     if not s:
         return 0.0
 
-    # remove símbolos comuns
     s = s.replace("R$", "").replace("r$", "").strip()
     s = s.replace(" ", "")
 
-    # pt-BR: 1.234,56 -> 1234.56
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
     try:
@@ -746,7 +771,8 @@ def get_loja_nome(loja_id) -> str:
         cur = conn.cursor()
         cur.execute("SELECT nome FROM lojas WHERE id = ?", (lid,))
         r = cur.fetchone()
-    return str(r[0]) if r else f"Loja {lid}"
+    # com row_factory, r["nome"]
+    return str(r["nome"]) if r else f"Loja {lid}"
 
 
 # =========================
@@ -785,11 +811,11 @@ def buscar_produto_por_codigo(loja_id: int, codigo: str):
     if not row:
         return None
     return {
-        "codigo": str(row[0]),
-        "nome": str(row[1]),
-        "preco_custo": float(row[2] or 0.0),
-        "preco_venda": float(row[3] or 0.0),
-        "quantidade": int(row[4] or 0),
+        "codigo": str(row["codigo"]),
+        "nome": str(row["nome"]),
+        "preco_custo": float(row["preco_custo"] or 0.0),
+        "preco_venda": float(row["preco_venda"] or 0.0),
+        "quantidade": int(row["quantidade"] or 0),
     }
 
 
@@ -881,7 +907,8 @@ def get_sessao_aberta(loja_id: int):
 def abrir_caixa_db(loja_id: int, saldo_inicial: float, operador: str = "", obs: str = "") -> int:
     atual = get_sessao_aberta(loja_id)
     if atual:
-        raise RuntimeError(f"Já existe um caixa ABERTO nesta loja (Sessão #{atual[0]}). Feche antes de abrir outro.")
+        # com row_factory
+        raise RuntimeError(f"Já existe um caixa ABERTO nesta loja (Sessão #{atual['id']}). Feche antes de abrir outro.")
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
@@ -900,7 +927,6 @@ def totais_sessao(loja_id: int, sessao_id: int):
     with conectar() as conn:
         cur = conn.cursor()
 
-        # garante que sessão pertence à loja
         cur.execute(
             """
             SELECT saldo_inicial, aberto_em
@@ -910,18 +936,18 @@ def totais_sessao(loja_id: int, sessao_id: int):
             (int(sessao_id), int(loja_id)),
         )
         row = cur.fetchone()
-        saldo_inicial = float(row[0] or 0.0) if row else 0.0
-        aberto_em = row[1] if row else ""
+        saldo_inicial = float(row["saldo_inicial"] or 0.0) if row else 0.0
+        aberto_em = row["aberto_em"] if row else ""
 
         cur.execute(
             """
-            SELECT COALESCE(SUM(total), 0)
+            SELECT COALESCE(SUM(total), 0) AS total
             FROM vendas_cabecalho
             WHERE loja_id = ? AND sessao_id = ? AND status='FINALIZADA'
             """,
             (int(loja_id), int(sessao_id)),
         )
-        total_vendas = float(cur.fetchone()[0] or 0.0)
+        total_vendas = float((cur.fetchone()["total"] or 0.0))
 
         saldo_final_sistema = saldo_inicial + total_vendas
         return saldo_inicial, total_vendas, saldo_final_sistema, aberto_em
@@ -932,7 +958,7 @@ def relatorio_pagamentos_sessao(loja_id: int, sessao_id: int):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT forma_pagamento, COALESCE(SUM(total), 0)
+            SELECT forma_pagamento, COALESCE(SUM(total), 0) AS total
             FROM vendas_cabecalho
             WHERE loja_id = ? AND sessao_id = ? AND status='FINALIZADA'
             GROUP BY forma_pagamento
@@ -940,7 +966,7 @@ def relatorio_pagamentos_sessao(loja_id: int, sessao_id: int):
             """,
             (int(loja_id), int(sessao_id)),
         )
-        return [(str(fp), float(t or 0.0)) for fp, t in cur.fetchall()]
+        return [(str(r["forma_pagamento"]), float(r["total"] or 0.0)) for r in cur.fetchall()]
 
 
 def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: str = ""):
@@ -1008,8 +1034,13 @@ if "cupom_nome" not in st.session_state:
 if "cupom_id" not in st.session_state:
     st.session_state.cupom_id = None
 
+# ✅ auth: dict com user autenticado
 if "auth" not in st.session_state:
-    st.session_state.auth = None  # dict com user
+    st.session_state.auth = None
+
+# ✅ loja ativa (multi-loja)
+if "loja_id_ativa" not in st.session_state:
+    st.session_state.loja_id_ativa = None
 
 st.title(APP_TITLE)
 
@@ -1042,22 +1073,32 @@ if not auth:
         if not user:
             st.sidebar.error("Usuário/senha inválidos (ou usuário inativo).")
         else:
+            # user já vem com "tipo" e "loja_id" (Parte 2 atualizada)
             st.session_state.auth = {
                 "username": user["username"],
                 "nome": user["nome"],
-                "role": user["role"],
-                "loja_id": user.get("loja_id"),  # ✅ importante pro multi-loja
+                "role": user["role"],          # mantém compatibilidade
+                "tipo": user["tipo"],          # ✅ novo padrão
+                "loja_id": user.get("loja_id")
             }
+            # reseta loja ativa ao logar
+            st.session_state.loja_id_ativa = None
             st.rerun()
 
     st.info("Faça login para usar o sistema.")
     st.stop()
 else:
-    st.sidebar.success(f"Logado: {auth['username']} ({auth['role']})")
+    tipo = st.session_state.auth.get("tipo") or role_to_tipo(st.session_state.auth.get("role"))
+    st.sidebar.success(f"Logado: {auth['username']} ({tipo})")
+
     if st.sidebar.button("Sair"):
         st.session_state.auth = None
-        if "loja_id" in st.session_state:
-            del st.session_state["loja_id"]
+
+        # limpa loja e estado sensível
+        for k in ["loja_id", "loja_id_ativa", "pagina"]:
+            if k in st.session_state:
+                del st.session_state[k]
+
         st.session_state.cart = []
         st.session_state.cupom_txt = None
         st.session_state.cupom_nome = None
@@ -1065,9 +1106,10 @@ else:
         st.rerun()
 
 # =========================
-# Seleção / Fixo de Loja
+# Seleção / Fixo de Loja (define loja_id_ativa)
 # =========================
-role = st.session_state.auth["role"]
+tipo = st.session_state.auth.get("tipo") or role_to_tipo(st.session_state.auth.get("role"))
+tipo = str(tipo).strip().lower()
 user_loja_id = st.session_state.auth.get("loja_id")
 
 st.sidebar.divider()
@@ -1076,33 +1118,35 @@ st.sidebar.header("🏪 Loja")
 df_lojas = listar_lojas_df()
 lojas_ativas = df_lojas[df_lojas["ativa"] == 1] if (df_lojas is not None and not df_lojas.empty) else df_lojas
 
-if "loja_id" not in st.session_state:
-    if role == "ADMIN":
-        st.session_state.loja_id = int(lojas_ativas.iloc[0]["id"]) if (lojas_ativas is not None and not lojas_ativas.empty) else 1
+# inicializa loja ativa
+if st.session_state.loja_id_ativa is None:
+    if tipo == "admin":
+        st.session_state.loja_id_ativa = int(lojas_ativas.iloc[0]["id"]) if (lojas_ativas is not None and not lojas_ativas.empty) else 1
     else:
-        st.session_state.loja_id = int(user_loja_id or 1)
+        st.session_state.loja_id_ativa = int(user_loja_id or 1)
 
-if role == "ADMIN":
+# admin pode escolher loja
+if tipo == "admin":
     opcoes = [f"{int(r.id)} — {r.nome}" for r in lojas_ativas.itertuples(index=False)]
     ids = [int(r.id) for r in lojas_ativas.itertuples(index=False)]
     try:
-        idx = ids.index(int(st.session_state.loja_id))
+        idx = ids.index(int(st.session_state.loja_id_ativa))
     except Exception:
         idx = 0
 
     escolha = st.sidebar.selectbox("Selecionar loja", opcoes, index=idx)
-    loja_id_ativa = int(escolha.split("—")[0].strip())
-    st.session_state.loja_id = loja_id_ativa
-else:
-    loja_id_ativa = int(st.session_state.loja_id)
-    st.sidebar.info(f"Loja fixa: **{get_loja_nome(loja_id_ativa)}**")
+    st.session_state.loja_id_ativa = int(escolha.split("—")[0].strip())
 
+else:
+    st.sidebar.info(f"Loja fixa: **{get_loja_nome(int(st.session_state.loja_id_ativa))}**")
+
+loja_id_ativa = int(st.session_state.loja_id_ativa)
 st.sidebar.caption(f"Loja ativa ID: {loja_id_ativa}")
 
 # =========================
 # Admin — Backup manual (UI)
 # =========================
-if role == "ADMIN":
+if tipo == "admin":
     st.sidebar.divider()
     st.sidebar.header("🧰 Admin: Backup")
 
@@ -1139,19 +1183,15 @@ if role == "ADMIN":
         st.sidebar.caption("Não foi possível listar backups.")
 
 # =========================
-# Navegação por perfil (FIX — não some mais)
+# Navegação por perfil (st.sidebar.radio)
 # =========================
-role = (st.session_state.auth.get("role") if st.session_state.get("auth") else None) or "OPERADOR"
-role = str(role).strip().upper()
-
-# ✅ páginas base sempre disponíveis (logado)
 paginas = ["🧾 Caixa (PDV)", "📈 Histórico", "📦 Estoque", "📅 Relatórios"]
 
-# ✅ só ADMIN vê usuários
-if role == "ADMIN":
+# só ADMIN vê usuários
+if tipo == "admin":
     paginas.append("👤 Usuários (Admin)")
 
-# ✅ estado da navegação (sem NameError / sem “sumir página”)
+# estado da navegação (sem sumir)
 if "pagina" not in st.session_state:
     st.session_state.pagina = "🧾 Caixa (PDV)"
 
@@ -1326,7 +1366,7 @@ st.sidebar.header("💰 Caixa (Abertura/Fechamento)")
 
 sess = None
 try:
-    sess = get_sessao_aberta(loja_id_ativa)
+    sess = get_sessao_aberta(loja_id_ativa)  # sqlite3.Row ou None
 except Exception:
     sess = None
 
@@ -1345,7 +1385,11 @@ if not sess:
         except Exception as e:
             st.sidebar.error(str(e))
 else:
-    sid, aberto_em, saldo_ini, operador = sess
+    sid = int(sess["id"])
+    aberto_em = sess["aberto_em"]
+    saldo_ini = float(sess["saldo_inicial"] or 0.0)
+    operador = sess["operador"] or ""
+
     st.sidebar.success(f"ABERTO — Sessão #{sid}")
     st.sidebar.caption(f"Aberto em: {aberto_em}")
     if operador:
@@ -1389,3 +1433,30 @@ else:
             st.rerun()
         except Exception as e:
             st.sidebar.error(str(e))
+
+# =========================
+# PÁGINAS (PARTE 4) — FINAL DO ARQUIVO
+# =========================
+
+if pagina == "🧾 Caixa (PDV)":
+    st.subheader("🧾 Caixa (PDV)")
+    st.write("Página do Caixa carregou ✅")
+    st.write("Loja ativa:", loja_id_ativa)
+
+elif pagina == "📦 Estoque":
+    st.subheader("📦 Estoque")
+    st.write("Página do Estoque carregou ✅")
+    st.dataframe(listar_produtos_df(loja_id_ativa), use_container_width=True)
+
+elif pagina == "📈 Histórico":
+    st.subheader("📈 Histórico")
+    st.write("Página do Histórico carregou ✅")
+
+elif pagina == "📅 Relatórios":
+    st.subheader("📅 Relatórios")
+    st.write("Página de Relatórios carregou ✅")
+
+elif pagina == "👤 Usuários (Admin)":
+    st.subheader("👤 Usuários (Admin)")
+    st.dataframe(listar_usuarios_df(), use_container_width=True)
+
