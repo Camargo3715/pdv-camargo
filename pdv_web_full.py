@@ -1364,7 +1364,15 @@ if role in ("ADMIN", "DONO", "OPERADOR"):
 if role == "ADMIN":
     paginas.append("👤 Usuários (Admin)")
 
-pagina = st.sidebar.radio("Navegação", paginas, index=0)
+# ✅ Render/Streamlit: usa key + fallback pra nunca dar NameError
+if "pagina" not in st.session_state:
+    st.session_state.pagina = paginas[0]
+
+# garante que a página salva ainda existe nas opções atuais (ex: troca de role)
+if st.session_state.pagina not in paginas:
+    st.session_state.pagina = paginas[0]
+
+pagina = st.sidebar.radio("Navegação", paginas, index=paginas.index(st.session_state.pagina), key="pagina")
 
 # =========================
 # Caixa (sidebar abrir/fechar sempre visível) — MULTI-LOJA
