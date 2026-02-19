@@ -1049,6 +1049,74 @@ def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: s
         "fechado_em": agora,
     }
 # =========================================================
+# ✅ IMPORTANTE (evita NameError: date)
+# Coloque no TOPO do arquivo (junto dos imports):
+# from datetime import datetime, timedelta, date
+# =========================================================
+
+
+# =========================================================
+# ✅ GARANTIAS DE ESTADO (evita NameError: pagina/auth/cart)
+# Coloque ANTES desta seção (ou deixe aqui mesmo, acima do sidebar do caixa)
+# =========================================================
+if "auth" not in st.session_state:
+    st.session_state.auth = None
+
+if "cart" not in st.session_state:
+    st.session_state.cart = []
+
+if "cupom_txt" not in st.session_state:
+    st.session_state.cupom_txt = None
+if "cupom_nome" not in st.session_state:
+    st.session_state.cupom_nome = None
+if "cupom_id" not in st.session_state:
+    st.session_state.cupom_id = None
+
+auth = st.session_state.get("auth") or {}
+
+def _tipo_atual() -> str:
+    # aceita auth["tipo"] ou auth["role"]
+    t = (auth.get("tipo") or auth.get("role") or "").strip().lower()
+    if t == "admin" or t == "administrador":
+        return "admin"
+    if t == "dono":
+        return "dono"
+    if t == "operador":
+        return "operador"
+    if t == "admin".upper():
+        return "admin"
+    if (auth.get("role") or "").strip().upper() == "ADMIN":
+        return "admin"
+    if (auth.get("role") or "").strip().upper() == "DONO":
+        return "dono"
+    if (auth.get("role") or "").strip().upper() == "OPERADOR":
+        return "operador"
+    return t or "operador"
+
+tipo = _tipo_atual()
+
+# =========================================================
+# ✅ NAVEGAÇÃO (DEFINE "pagina" ANTES DE USAR)
+# Coloque isso ANTES do bloco "if pagina == ..."
+# =========================================================
+paginas = ["🧾 Caixa (PDV)", "📦 Estoque", "📈 Histórico", "📅 Relatórios"]
+if tipo == "admin":
+    paginas.append("👤 Usuários (Admin)")
+
+if "pagina" not in st.session_state:
+    st.session_state.pagina = "🧾 Caixa (PDV)"
+
+if st.session_state.pagina not in paginas:
+    st.session_state.pagina = "🧾 Caixa (PDV)"
+
+pagina = st.sidebar.radio(
+    "Navegação",
+    paginas,
+    index=paginas.index(st.session_state.pagina),
+    key="pagina",
+)
+
+# =========================================================
 # 1) SIDEBAR — CAIXA (Abertura/Fechamento) — sempre visível
 # =========================================================
 st.sidebar.divider()
@@ -1060,20 +1128,38 @@ try:
 except Exception:
     sess = None
 
+def _sess_get(sess_obj, key_or_index, default=None):
+    """
+    Lê sess tanto se for tuple (fetchone padrão) quanto sqlite3.Row/dict-like.
+    """
+    if sess_obj is None:
+        return default
+    try:
+        # sqlite3.Row / dict-like
+        if hasattr(sess_obj, "keys"):
+            return sess_obj.get(key_or_index, default) if isinstance(sess_obj, dict) else sess_obj[key_or_index]
+    except Exception:
+        pass
+    # tuple/list
+    try:
+        return sess_obj[key_or_index]
+    except Exception:
+        return default
+
 if not sess:
     st.sidebar.error("CAIXA FECHADO")
 
     with st.sidebar.form("abrir_caixa"):
         operador = st.text_input(
-    "Operador (opcional)",
-    value=(
-        st.session_state.auth.get("username", "")
-        if st.session_state.get("auth")
-        else ""
-    )
-)
-
-        saldo_ini = st.number_input("Saldo inicial (fundo)", min_value=0.0, step=10.0, format="%.2f")
+            "Operador (opcional)",
+            value=(auth.get("username", "") if auth else "")
+        )
+        saldo_ini = st.number_input(
+            "Saldo inicial (fundo)",
+            min_value=0.0,
+            step=10.0,
+            format="%.2f"
+        )
         obs = st.text_input("Observação (opcional)", value="")
         ok = st.form_submit_button("🔓 Abrir Caixa")
 
@@ -1086,7 +1172,10 @@ if not sess:
             st.sidebar.error(str(e))
 
 else:
-    sid, aberto_em, saldo_ini, operador = sess
+    sid = int(_sess_get(sess, "id", _sess_get(sess, 0, 0)) or 0)
+    aberto_em = _sess_get(sess, "aberto_em", _sess_get(sess, 1, ""))
+    saldo_ini = float(_sess_get(sess, "saldo_inicial", _sess_get(sess, 2, 0.0)) or 0.0)
+    operador = _sess_get(sess, "operador", _sess_get(sess, 3, "")) or ""
 
     st.sidebar.success(f"ABERTO — Sessão #{sid}")
     st.sidebar.caption(f"Aberto em: {aberto_em}")
@@ -1128,7 +1217,7 @@ else:
             st.sidebar.success("Caixa fechado!")
             st.sidebar.write(f"Diferença: **R$ {brl(res['diferenca'])}**")
 
-            # opcional: limpa estado
+            # limpa estado
             st.session_state.cart = []
             st.session_state.cupom_txt = None
             st.session_state.cupom_nome = None
@@ -1142,18 +1231,6 @@ else:
 # =========================================================
 # 2) PÁGINAS — (Caixa / Estoque / Histórico / Usuários / Relatórios)
 # =========================================================
-
-# ✅ garante cupom state (pra não sumir)
-if "cupom_txt" not in st.session_state:
-    st.session_state.cupom_txt = None
-if "cupom_nome" not in st.session_state:
-    st.session_state.cupom_nome = None
-if "cupom_id" not in st.session_state:
-    st.session_state.cupom_id = None
-
-# =========================
-# PÁGINAS — FINAL DO ARQUIVO
-# =========================
 
 # 🔁 Recarrega sessão do caixa sempre que trocar página/loja
 try:
@@ -1210,7 +1287,6 @@ if pagina == "🧾 Caixa (PDV)":
         if st.session_state.cart:
             df_cart = pd.DataFrame(st.session_state.cart)
 
-            # garante colunas
             for col in ["codigo", "produto", "preco_unit", "qtd", "preco_custo", "total_item"]:
                 if col not in df_cart.columns:
                     df_cart[col] = 0
@@ -1279,8 +1355,7 @@ if pagina == "🧾 Caixa (PDV)":
         if not sess:
             st.info("Abra o caixa primeiro.")
         else:
-            # sess pode ser tuple ou Row
-            sid = int(sess["id"]) if isinstance(sess, dict) or hasattr(sess, "keys") else int(sess[0])
+            sid = int(_sess_get(sess, "id", _sess_get(sess, 0, 0)) or 0)
 
             forma_ui = st.selectbox(
                 "Forma de pagamento",
@@ -1315,7 +1390,6 @@ if pagina == "🧾 Caixa (PDV)":
                 if not st.session_state.cart:
                     st.error("Carrinho vazio.")
                 else:
-                    # valida estoque
                     for it in st.session_state.cart:
                         prod = buscar_produto_por_codigo(loja_id_ativa, it["codigo"])
                         if not prod:
@@ -1350,7 +1424,14 @@ if pagina == "🧾 Caixa (PDV)":
                         st.stop()
 
                     numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
-                    txt = cupom_txt(st.session_state.cart, numero_venda, forma_ui, float(desconto), float(recebido), float(troco))
+                    txt = cupom_txt(
+                        st.session_state.cart,
+                        numero_venda,
+                        forma_ui,
+                        float(desconto),
+                        float(recebido),
+                        float(troco),
+                    )
 
                     st.session_state.cupom_txt = txt
                     st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
@@ -1453,6 +1534,10 @@ elif pagina == "📦 Estoque":
 elif pagina == "📈 Histórico":
     st.subheader(f"📈 Histórico de Vendas (itens) — {get_loja_nome(loja_id_ativa)}")
 
+    if "listar_vendas_itens_df" not in globals():
+        st.error("Função listar_vendas_itens_df() não existe no arquivo. Cole também a função de Histórico.")
+        st.stop()
+
     filtro = st.text_input("Filtrar por produto (contém)", value="")
     df = listar_vendas_itens_df(loja_id_ativa, filtro_produto=filtro)
 
@@ -1473,6 +1558,11 @@ elif pagina == "📈 Histórico":
 # =========================
 elif pagina == "📅 Relatórios":
     st.subheader(f"📅 Relatórios — {get_loja_nome(loja_id_ativa)}")
+
+    missing = [fn for fn in ["listar_vendas_por_periodo_df", "totais_por_dia_do_mes"] if fn not in globals()]
+    if missing:
+        st.error(f"Faltam funções no arquivo: {', '.join(missing)}. Cole também as funções de Relatórios.")
+        st.stop()
 
     st.markdown("### Vendas por período (por cupom)")
     c1, c2 = st.columns(2)
@@ -1512,7 +1602,7 @@ elif pagina == "📅 Relatórios":
 # Página: Usuários (Admin)
 # =========================
 elif pagina == "👤 Usuários (Admin)":
-    if (st.session_state.auth.get("tipo") or "").lower() != "admin" and (st.session_state.auth.get("role") or "") != "ADMIN":
+    if tipo != "admin":
         st.error("Acesso negado. Apenas ADMIN pode acessar Usuários.")
         st.stop()
 
