@@ -8,10 +8,9 @@ import os
 import sqlite3
 import secrets
 import hashlib
-import shutil
 import glob
 
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 
 import streamlit as st
 import pandas as pd
@@ -60,23 +59,26 @@ BACKUP_ENABLED = os.getenv("BACKUP_ENABLED", "1") == "1"
 BACKUP_ON_STARTUP = os.getenv("BACKUP_ON_STARTUP", "1") == "1"
 BACKUP_RETENTION_DAYS = int(os.getenv("BACKUP_RETENTION_DAYS", "14"))  # mantém últimos N dias
 
+
 def garantir_pasta_backup():
     try:
         os.makedirs(BACKUP_DIR, exist_ok=True)
     except Exception:
         pass
 
+
 def _backup_filename(prefix: str = "pdv") -> str:
     # 1 backup por dia (padrão): pdv_YYYY-MM-DD.db
-    # Se você quiser mais granular, troque por %H-%M também.
     hoje = datetime.now().strftime("%Y-%m-%d")
     return f"{prefix}_{hoje}.db"
+
 
 def listar_backups(prefix: str = "pdv"):
     garantir_pasta_backup()
     pattern = os.path.join(BACKUP_DIR, f"{prefix}_*.db")
     files = sorted(glob.glob(pattern), reverse=True)
     return files
+
 
 def limpar_backups_antigos(prefix: str = "pdv"):
     """
@@ -90,7 +92,6 @@ def limpar_backups_antigos(prefix: str = "pdv"):
     for fp in listar_backups(prefix=prefix):
         try:
             base = os.path.basename(fp)  # pdv_YYYY-MM-DD.db
-            # tenta extrair data
             parte = base.replace(f"{prefix}_", "").replace(".db", "")
             dt = datetime.strptime(parte, "%Y-%m-%d")
             if dt < limite:
@@ -99,17 +100,26 @@ def limpar_backups_antigos(prefix: str = "pdv"):
             # se falhar parse, não apaga
             pass
 
+
 def sqlite_backup_seguro(db_path: str, backup_path: str):
     """
     Faz backup seguro usando a API de backup do SQLite (melhor que copiar arquivo).
     """
     garantir_pasta_backup()
+
+    # Se DB ainda não existe, não tenta
+    if not os.path.exists(db_path):
+        return
+
     src = None
     dst = None
     try:
-        src = sqlite3.connect(db_path, check_same_thread=False)
+        src = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         src.execute("PRAGMA foreign_keys = ON;")
-        dst = sqlite3.connect(backup_path, check_same_thread=False)
+        # WAL melhora concorrência (Streamlit abre/conecta várias vezes)
+        src.execute("PRAGMA journal_mode=WAL;")
+
+        dst = sqlite3.connect(backup_path, check_same_thread=False, timeout=30)
         src.backup(dst)
         dst.commit()
     finally:
@@ -123,6 +133,7 @@ def sqlite_backup_seguro(db_path: str, backup_path: str):
                 src.close()
         except Exception:
             pass
+
 
 def criar_backup_agora(prefix: str = "pdv") -> str:
     """
@@ -146,6 +157,7 @@ def criar_backup_agora(prefix: str = "pdv") -> str:
     sqlite_backup_seguro(DB_PATH, backup_path)
     limpar_backups_antigos(prefix=prefix)
     return backup_path
+
 
 def auto_backup_se_precisar(prefix: str = "pdv"):
     """
@@ -211,20 +223,60 @@ def garantir_lojas_padrao(conn: sqlite3.Connection):
 
 def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     """
-    Migra tabela produtos antiga (codigo UNIQUE global) para multi-loja (UNIQUE(loja_id, codigo)).
-    Faz rebuild seguro: cria produtos_new, copia, drop, rename.
+    Migra tabela produtos antiga para multi-loja (UNIQUE(loja_id, codigo)).
+    ✅ Corrigido: agora é robusto e não quebra se o schema antigo for diferente.
     """
     if not tabela_existe(conn, "produtos"):
         return
 
-    # Se já tem loja_id e UNIQUE por loja, não faz nada
+    # Se já tem loja_id, assume que já é multi-loja
     if coluna_existe(conn, "produtos", "loja_id"):
         return
 
+    # Detecta colunas existentes (legados possíveis)
     cur = conn.cursor()
-    cur.execute("SELECT id, codigo, nome, preco_custo, preco_venda, quantidade FROM produtos")
-    rows = cur.fetchall()
+    cur.execute("PRAGMA table_info(produtos)")
+    cols = [r[1] for r in cur.fetchall()]
 
+    # Mapeia possíveis nomes antigos -> padrão
+    # Padrão alvo: codigo, nome, preco_custo, preco_venda, quantidade
+    has_codigo = "codigo" in cols
+    has_nome = "nome" in cols
+    has_pc = "preco_custo" in cols
+    has_pv = "preco_venda" in cols
+    has_qtd = "quantidade" in cols
+
+    # Legado CSV/primeiros modelos:
+    # ["Produto", "Preço", "Quantidade"] ou similares
+    legacy_prod = "Produto" in cols
+    legacy_preco = "Preço" in cols or "Preco" in cols
+    legacy_qtd = "Quantidade" in cols
+
+    # Se não dá pra entender o formato antigo, não migra (evita quebrar o app)
+    if not ((has_codigo and has_nome and has_pv and has_qtd) or (legacy_prod and legacy_preco and legacy_qtd)):
+        return
+
+    # Lê os dados do formato atual/legado
+    rows = []
+    try:
+        if has_codigo:
+            # formato mais novo sem loja_id
+            cur.execute("SELECT id, codigo, nome, preco_custo, preco_venda, quantidade FROM produtos")
+            rows = cur.fetchall()
+        else:
+            # formato bem antigo: sem codigo e sem custo
+            # cria um "codigo" baseado no id (ou nome) para não perder produto
+            col_preco = "Preço" if "Preço" in cols else ("Preco" if "Preco" in cols else None)
+            if col_preco is None:
+                return
+            cur.execute(f"SELECT id, Produto, {col_preco}, Quantidade FROM produtos")
+            raw = cur.fetchall()
+            for (pid, prod_nome, pv, qtd) in raw:
+                rows.append((pid, str(pid), str(prod_nome or ""), 0.0, float(pv or 0), int(qtd or 0)))
+    except Exception:
+        return
+
+    # Rebuild seguro
     conn.execute("""
     CREATE TABLE IF NOT EXISTS produtos_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -245,7 +297,7 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
             INSERT INTO produtos_new (id, loja_id, codigo, nome, preco_custo, preco_venda, quantidade)
             VALUES (?, 1, ?, ?, ?, ?, ?)
             """,
-            (pid, (codigo or "").strip(), nome, float(pc or 0), float(pv or 0), int(qtd or 0)),
+            (pid, (str(codigo) or "").strip(), str(nome or ""), float(pc or 0), float(pv or 0), int(qtd or 0)),
         )
 
     conn.execute("DROP TABLE produtos")
@@ -260,11 +312,16 @@ def conectar():
     """
     Conecta no SQLite. Se o caminho atual falhar (permissão/pasta),
     cai automaticamente para /tmp/pdv.db para não dar tela preta.
+
+    ✅ Ajustes:
+    - timeout maior (evita "database is locked")
+    - WAL melhora concorrência no Streamlit/Render
     """
     global DB_PATH
     try:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode=WAL;")
         return conn
     except sqlite3.OperationalError:
         # fallback final (Render Free)
@@ -273,8 +330,9 @@ def conectar():
             os.makedirs("/tmp", exist_ok=True)
         except Exception:
             pass
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode=WAL;")
         return conn
 
 
@@ -292,7 +350,6 @@ def inicializar_banco():
         garantir_lojas_padrao(conn)
 
         # 2) Produtos (rebuild se era legado)
-        #    (se já existia sem loja_id, migra para UNIQUE(loja_id, codigo))
         if tabela_existe(conn, "produtos"):
             migrar_produtos_para_multiloja(conn)
         else:
@@ -381,7 +438,6 @@ def inicializar_banco():
         """)
 
         # 3) Migração: adiciona loja_id nas tabelas existentes (se ainda não tiver)
-        # Observação: produtos já foi tratado via rebuild acima.
         for tabela in ["vendas", "caixa_sessoes", "vendas_cabecalho", "vendas_itens"]:
             if tabela_existe(conn, tabela) and not coluna_existe(conn, tabela, "loja_id"):
                 add_coluna_se_nao_existe(conn, tabela, "loja_id INTEGER NOT NULL DEFAULT 1", "loja_id")
@@ -398,6 +454,7 @@ def inicializar_banco():
 
     # ✅ Auto-backup diário (fora do with, pra não conflitar com a conexão ativa)
     auto_backup_se_precisar(prefix="pdv")
+
 
 # =========================
 # Usuários / Auth (Login)
@@ -425,10 +482,6 @@ def inicializar_usuarios():
     ✅ Cria a tabela usuarios (multi-loja) e, se não existir nenhum usuário,
     cria um ADMIN inicial usando ADMIN_USER/ADMIN_PASS (Render env),
     ou padrão admin/admin123.
-
-    Roles:
-    - ADMIN: vê todas as lojas (loja_id pode ser NULL)
-    - DONO / OPERADOR: presos em uma loja (loja_id obrigatório)
     """
     with conectar() as conn:
         cur = conn.cursor()
@@ -453,11 +506,8 @@ def inicializar_usuarios():
         """)
 
         # ✅ Migração suave: se a tabela já existia e não tem loja_id
-        # Observação: como a tabela já existe, IF NOT EXISTS não altera schema,
-        # então precisamos checar e adicionar a coluna de verdade.
         if not coluna_existe(conn, "usuarios", "loja_id"):
             add_coluna_se_nao_existe(conn, "usuarios", "loja_id INTEGER", "loja_id")
-            # Operadores antigos viram loja 1 por padrão
             try:
                 conn.execute("UPDATE usuarios SET loja_id = 1 WHERE (role='OPERADOR') AND (loja_id IS NULL)")
             except Exception:
@@ -540,11 +590,12 @@ def listar_usuarios_df():
             conn,
         )
 
-
 # =========================
 # Usuários (CRUD)
 # =========================
-def criar_usuario(username: str, nome: str, role: str, senha: str, loja_id: int | None = None, ativo: int = 1):
+from typing import Optional
+
+def criar_usuario(username: str, nome: str, role: str, senha: str, loja_id: Optional[int] = None, ativo: int = 1):
     username = (username or "").strip().lower()
     nome = (nome or "").strip()
     role = (role or "").strip().upper()
@@ -578,7 +629,7 @@ def criar_usuario(username: str, nome: str, role: str, senha: str, loja_id: int 
         conn.commit()
 
 
-def atualizar_usuario_role_ativo(username: str, role: str, ativo: int, loja_id: int | None = None):
+def atualizar_usuario_role_ativo(username: str, role: str, ativo: int, loja_id: Optional[int] = None):
     username = (username or "").strip().lower()
     role = (role or "").strip().upper()
 
@@ -628,10 +679,20 @@ def atualizar_senha(username: str, nova_senha: str):
 # =========================
 # Utilitários
 # =========================
-def to_float(txt):
-    s = str(txt).strip().replace(" ", "")
+def to_float(txt) -> float:
+    """
+    Converte entrada do usuário para float.
+    Aceita: "10", "10,50", "1.234,56", "R$ 10,00", "".
+    """
+    s = str(txt or "").strip()
     if not s:
         return 0.0
+
+    # remove símbolos comuns
+    s = s.replace("R$", "").replace("r$", "").strip()
+    s = s.replace(" ", "")
+
+    # pt-BR: 1.234,56 -> 1234.56
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
     try:
@@ -672,12 +733,21 @@ def listar_lojas_df():
     return df
 
 
-def get_loja_nome(loja_id: int) -> str:
+def get_loja_nome(loja_id) -> str:
+    """
+    Mais robusto: aceita loja_id None/str/int sem quebrar.
+    """
+    try:
+        lid = int(loja_id)
+    except Exception:
+        return "Loja"
+
     with conectar() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT nome FROM lojas WHERE id = ?", (int(loja_id),))
+        cur.execute("SELECT nome FROM lojas WHERE id = ?", (lid,))
         r = cur.fetchone()
-    return str(r[0]) if r else f"Loja {loja_id}"
+    return str(r[0]) if r else f"Loja {lid}"
+
 
 # =========================
 # Produtos (Estoque) — MULTI-LOJA
@@ -737,7 +807,6 @@ def upsert_produto(loja_id: int, codigo: str, nome: str, preco_custo: float, pre
 
     with conectar() as conn:
         cur = conn.cursor()
-        # transação explícita reduz risco de conflito
         cur.execute("BEGIN IMMEDIATE")
         cur.execute(
             """
@@ -775,7 +844,6 @@ def baixar_estoque_por_codigo(loja_id: int, codigo: str, qtd: int):
 
     with conectar() as conn:
         cur = conn.cursor()
-        # BEGIN IMMEDIATE: garante lock de escrita, evitando corrida em multi-acesso
         cur.execute("BEGIN IMMEDIATE")
         cur.execute(
             """
@@ -921,17 +989,18 @@ def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: s
     }
 
 # =========================
-# Página: Caixa (PDV)
+# App (UI)
 # =========================
+st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# ✅ GARANTE que "pagina" exista (evita NameError)
-pagina = st.session_state.get("pagina", "🧾 Caixa")
+# inicializa tabelas
+inicializar_banco()
+inicializar_usuarios()
 
-# ✅ GARANTE carrinho (evita KeyError)
+# ✅ estados globais
 if "cart" not in st.session_state:
     st.session_state.cart = []
 
-# ✅ Cupom persistente (não some)
 if "cupom_txt" not in st.session_state:
     st.session_state.cupom_txt = None
 if "cupom_nome" not in st.session_state:
@@ -939,259 +1008,159 @@ if "cupom_nome" not in st.session_state:
 if "cupom_id" not in st.session_state:
     st.session_state.cupom_id = None
 
-# ✅ GARANTE loja ativa (evita NameError em loja_id_ativa e erros por None)
-loja_id_ativa = st.session_state.get("loja_id")
-if not loja_id_ativa:
-    st.warning("Selecione uma loja na barra lateral para abrir o caixa.")
+if "auth" not in st.session_state:
+    st.session_state.auth = None  # dict com user
+
+st.title(APP_TITLE)
+
+# ✅ informações úteis (sem expor demais)
+st.caption(f"DB: {DB_PATH}")
+st.caption(f"Backups: {BACKUP_DIR} | Retenção: {BACKUP_RETENTION_DAYS} dias | Ativo: {('SIM' if BACKUP_ENABLED else 'NÃO')}")
+
+if IS_RENDER and (BACKUP_DIR or "").startswith("/tmp"):
+    st.warning(
+        "⚠️ Render Free: backups em /tmp podem SUMIR ao reiniciar. "
+        "Recomendado: usar Render Disk e setar BACKUP_DIR=/var/data/backups e DATABASE_PATH=/var/data/pdv.db"
+    )
+
+# =========================
+# Login (Sidebar)
+# =========================
+st.sidebar.divider()
+st.sidebar.header("🔐 Login")
+
+auth = st.session_state.auth
+
+if not auth:
+    with st.sidebar.form("login_form"):
+        u = st.text_input("Usuário", value="")
+        p = st.text_input("Senha", value="", type="password")
+        entrar = st.form_submit_button("Entrar")
+
+    if entrar:
+        user = autenticar(u, p)
+        if not user:
+            st.sidebar.error("Usuário/senha inválidos (ou usuário inativo).")
+        else:
+            st.session_state.auth = {
+                "username": user["username"],
+                "nome": user["nome"],
+                "role": user["role"],
+                "loja_id": user.get("loja_id"),  # ✅ importante pro multi-loja
+            }
+            st.rerun()
+
+    st.info("Faça login para usar o sistema.")
     st.stop()
+else:
+    st.sidebar.success(f"Logado: {auth['username']} ({auth['role']})")
+    if st.sidebar.button("Sair"):
+        st.session_state.auth = None
+        if "loja_id" in st.session_state:
+            del st.session_state["loja_id"]
+        st.session_state.cart = []
+        st.session_state.cupom_txt = None
+        st.session_state.cupom_nome = None
+        st.session_state.cupom_id = None
+        st.rerun()
 
-# ✅ GARANTE que sess exista (mesmo que seja None)
-# >>> TROQUE a linha abaixo pela SUA função real <<<
-# Exemplo: sess = obter_sessao_aberta(loja_id_ativa)
-try:
-    sess = obter_sessao_aberta(loja_id_ativa)  # <-- ajuste o nome da função aqui
-except NameError:
-    sess = None  # se você ainda não declarou a função, evita NameError
-except Exception:
-    sess = None
+# =========================
+# Seleção / Fixo de Loja
+# =========================
+role = st.session_state.auth["role"]
+user_loja_id = st.session_state.auth.get("loja_id")
 
-if isinstance(pagina, str) and pagina.startswith("🧾"):
-    col1, col2 = st.columns([2.2, 1], gap="large")
+st.sidebar.divider()
+st.sidebar.header("🏪 Loja")
 
-    with col1:
-        st.subheader(f"🧾 Caixa — {get_loja_nome(loja_id_ativa)}")
-        st.caption("Lançar item por código")
+df_lojas = listar_lojas_df()
+lojas_ativas = df_lojas[df_lojas["ativa"] == 1] if (df_lojas is not None and not df_lojas.empty) else df_lojas
 
-        if not sess:
-            st.info("Abra o caixa na barra lateral para vender.")
-        else:
-            with st.form("add_item", clear_on_submit=True):
-                codigo = st.text_input("Código", placeholder="Bipe o código / digite e Enter")
-                qtd = st.number_input("Quantidade", min_value=1, step=1, value=1)
-                add = st.form_submit_button("Adicionar")
+if "loja_id" not in st.session_state:
+    if role == "ADMIN":
+        st.session_state.loja_id = int(lojas_ativas.iloc[0]["id"]) if (lojas_ativas is not None and not lojas_ativas.empty) else 1
+    else:
+        st.session_state.loja_id = int(user_loja_id or 1)
 
-            if add:
-                codigo = (codigo or "").strip()
-                if not codigo:
-                    st.warning("Digite/bipe um código.")
-                else:
-                    prod = buscar_produto_por_codigo(loja_id_ativa, codigo)
-                    if not prod:
-                        st.error("Produto não encontrado pelo código (nesta loja).")
-                    else:
-                        qtd = int(qtd)
-                        if qtd > int(prod.get("quantidade", 0)):
-                            st.error("Quantidade excede o estoque disponível.")
-                        else:
-                            st.session_state.cart.append(
-                                {
-                                    "codigo": str(prod["codigo"]),
-                                    "produto": str(prod["nome"]),
-                                    "preco_unit": float(prod["preco_venda"]),
-                                    "preco_custo": float(prod.get("preco_custo", 0.0)),
-                                    "qtd": int(qtd),
-                                    "total_item": float(prod["preco_venda"]) * int(qtd),
-                                }
-                            )
-                            st.success("Item adicionado!")
+if role == "ADMIN":
+    opcoes = [f"{int(r.id)} — {r.nome}" for r in lojas_ativas.itertuples(index=False)]
+    ids = [int(r.id) for r in lojas_ativas.itertuples(index=False)]
+    try:
+        idx = ids.index(int(st.session_state.loja_id))
+    except Exception:
+        idx = 0
 
-        st.subheader("Carrinho (editável)")
+    escolha = st.sidebar.selectbox("Selecionar loja", opcoes, index=idx)
+    loja_id_ativa = int(escolha.split("—")[0].strip())
+    st.session_state.loja_id = loja_id_ativa
+else:
+    loja_id_ativa = int(st.session_state.loja_id)
+    st.sidebar.info(f"Loja fixa: **{get_loja_nome(loja_id_ativa)}**")
 
-        if st.session_state.cart:
-            df_cart = pd.DataFrame(st.session_state.cart)
+st.sidebar.caption(f"Loja ativa ID: {loja_id_ativa}")
 
-            # ✅ garante colunas mínimas (evita erro se algo vier faltando)
-            for col in ["codigo", "produto", "preco_unit", "qtd", "preco_custo", "total_item"]:
-                if col not in df_cart.columns:
-                    df_cart[col] = 0
+# =========================
+# Admin — Backup manual (UI)
+# =========================
+if role == "ADMIN":
+    st.sidebar.divider()
+    st.sidebar.header("🧰 Admin: Backup")
 
-            df_edit = df_cart[["codigo", "produto", "preco_unit", "qtd"]].copy()
-
-            edited = st.data_editor(
-                df_edit,
-                use_container_width=True,
-                hide_index=True,
-                num_rows="fixed",
-                disabled=["codigo", "produto"],
-                column_config={
-                    "preco_unit": st.column_config.NumberColumn("Preço unit.", min_value=0.0, step=0.5),
-                    "qtd": st.column_config.NumberColumn("Qtd", min_value=1, step=1),
-                },
-                key="cart_editor",
-            )
-
-            # aplicar edições
-            new_cart = []
-            for i in range(len(edited)):
-                row = edited.iloc[i].to_dict()
-                preco = float(row.get("preco_unit", 0.0))
-                qtd_i = int(row.get("qtd", 1))
-
-                custo = float(df_cart.iloc[i].get("preco_custo", 0.0)) if i < len(df_cart) else 0.0
-
-                new_cart.append(
-                    {
-                        "codigo": str(row.get("codigo", "")),
-                        "produto": str(row.get("produto", "")),
-                        "preco_unit": preco,
-                        "preco_custo": custo,
-                        "qtd": qtd_i,
-                        "total_item": preco * qtd_i,
-                    }
-                )
-
-            st.session_state.cart = new_cart
-
-            subtotal = float(sum(i["total_item"] for i in st.session_state.cart))
-            st.metric("Subtotal", f"R$ {brl(subtotal)}")
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                if st.button("Limpar carrinho"):
-                    st.session_state.cart = []
-                    st.rerun()
-            with c2:
-                idx = st.number_input(
-                    "Remover item (nº)",
-                    min_value=1,
-                    max_value=len(st.session_state.cart),
-                    value=1,
-                    step=1,
-                )
-            with c3:
-                if st.button("Remover"):
-                    st.session_state.cart.pop(int(idx) - 1)
-                    st.rerun()
-        else:
-            st.caption("Carrinho vazio.")
-
-    with col2:
-        st.subheader("Finalizar venda")
-
-        if not sess:
-            st.info("Abra o caixa primeiro.")
-        else:
-            # ✅ se sess não for tupla/list, evita crash
-            if isinstance(sess, (list, tuple)) and len(sess) >= 1:
-                sid = sess[0]
+    if st.sidebar.button("📦 Gerar backup agora"):
+        try:
+            bp = criar_backup_agora(prefix="pdv_manual")
+            if bp:
+                st.sidebar.success(f"Backup criado: {os.path.basename(bp)}")
             else:
-                st.error("Sessão do caixa inválida. Reabra o caixa.")
-                st.stop()
+                st.sidebar.warning("Backup não criado (DB ainda não existe ou backup desabilitado).")
+        except Exception as e:
+            st.sidebar.error(f"Falha ao gerar backup: {e}")
 
-            forma_ui = st.selectbox(
-                "Forma de pagamento",
-                ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"],
-                index=0
-            )
-
-            desconto_txt = st.text_input("Desconto (R$)", value="0")
-            recebido_txt = st.text_input(
-                "Recebido (somente dinheiro)",
-                value="0",
-                disabled=(forma_ui != "Dinheiro")
-            )
-
-            df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
-            subtotal = float(df_cart["total_item"].sum()) if (not df_cart.empty and "total_item" in df_cart.columns) else 0.0
-
-            desconto = to_float(desconto_txt)
-            if desconto < 0:
-                desconto = 0.0
-            if desconto > subtotal:
-                desconto = subtotal  # ✅ não deixa passar do subtotal
-
-            total_liq = max(0.0, subtotal - float(desconto))
-
-            recebido = to_float(recebido_txt) if forma_ui == "Dinheiro" else 0.0
-            troco = max(0.0, recebido - total_liq) if forma_ui == "Dinheiro" else 0.0
-
-            st.write(f"Total: **R$ {brl(subtotal)}**")
-            st.write(f"Desconto: **R$ {brl(desconto)}**")
-            st.write(f"Total a pagar: **R$ {brl(total_liq)}**")
-            if forma_ui == "Dinheiro":
-                st.write(f"Troco: **R$ {brl(troco)}**")
-
-            if st.button("✅ FINALIZAR"):
-                if not st.session_state.cart:
-                    st.error("Carrinho vazio.")
-                else:
-                    # valida estoque (por loja) antes de gravar
-                    for it in st.session_state.cart:
-                        prod = buscar_produto_por_codigo(loja_id_ativa, it["codigo"])
-                        if not prod:
-                            st.error(f"Produto {it['codigo']} não encontrado no estoque desta loja.")
-                            st.stop()
-                        if int(it["qtd"]) > int(prod.get("quantidade", 0)):
-                            st.error(f"Estoque insuficiente para {it['produto']}.")
-                            st.stop()
-
-                    if forma_ui == "Dinheiro" and recebido < total_liq:
-                        st.error("Valor recebido menor que o total com desconto.")
-                        st.stop()
-
-                    forma_db = map_forma_pagamento(forma_ui)
-
-                    # ✅ venda + itens + baixa estoque (1 transação)
-                    try:
-                        venda_id = registrar_venda_completa_db(
-                            loja_id=loja_id_ativa,
-                            sessao_id=int(sid),
-                            itens=st.session_state.cart,
-                            forma_pagamento=forma_db,
-                            subtotal=subtotal,
-                            desconto=float(desconto),
-                            total=total_liq,
-                            recebido=float(recebido),
-                            troco=float(troco),
-                            status="FINALIZADA",
-                            baixar_estoque=True,
+    # Lista backups e permite baixar
+    try:
+        backups = listar_backups(prefix="pdv_manual")[:10]
+        if backups:
+            st.sidebar.caption("Últimos backups manuais:")
+            for fp in backups:
+                try:
+                    nome = os.path.basename(fp)
+                    with open(fp, "rb") as f:
+                        st.sidebar.download_button(
+                            label=f"⬇️ {nome}",
+                            data=f.read(),
+                            file_name=nome,
+                            mime="application/octet-stream",
                         )
-                    except Exception as e:
-                        st.error(f"Erro ao registrar venda: {e}")
-                        st.stop()
+                except Exception:
+                    pass
+        else:
+            st.sidebar.caption("Nenhum backup manual ainda.")
+    except Exception:
+        st.sidebar.caption("Não foi possível listar backups.")
 
-                    numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
+# =========================
+# Navegação por perfil
+# =========================
+paginas = ["🧾 Caixa (PDV)", "📈 Histórico"]
 
-                    txt = cupom_txt(
-                        st.session_state.cart,
-                        numero_venda,
-                        forma_ui,
-                        float(desconto),
-                        float(recebido),
-                        float(troco),
-                    )
+if role in ("ADMIN", "DONO", "OPERADOR"):
+    paginas.insert(1, "📦 Estoque")
+    paginas.append("📅 Relatórios")
 
-                    st.session_state.cupom_txt = txt
-                    st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
-                    st.session_state.cupom_id = venda_id
+if role == "ADMIN":
+    paginas.append("👤 Usuários (Admin)")
 
-                    # limpa carrinho
-                    st.session_state.cart = []
+# ✅ estado da navegação (sem NameError)
+if "pagina" not in st.session_state:
+    st.session_state.pagina = paginas[0]
 
-                    st.success("Venda registrada com sucesso!")
+if st.session_state.pagina not in paginas:
+    st.session_state.pagina = paginas[0]
 
-            # ✅ Exibe cupom sempre (fora do botão)
-            if st.session_state.cupom_txt:
-                st.divider()
-                st.success(f"🧾 Cupom/ID: {st.session_state.cupom_id}")
+pagina = st.sidebar.radio("Navegação", paginas, index=paginas.index(st.session_state.pagina), key="pagina")
 
-                st.text_area("Cupom gerado", value=st.session_state.cupom_txt, height=420)
-
-                st.download_button(
-                    "⬇️ Baixar Cupom TXT",
-                    data=st.session_state.cupom_txt.encode("utf-8"),
-                    file_name=st.session_state.cupom_nome or "cupom.txt",
-                    mime="text/plain",
-                )
-
-                if st.button("🆕 Nova venda (limpar cupom)"):
-                    st.session_state.cupom_txt = None
-                    st.session_state.cupom_nome = None
-                    st.session_state.cupom_id = None
-                    st.rerun()
 # =========================
 # Cupom (TXT para download)
-# (mantive igual; depois, se quiser, eu puxo os dados reais da loja do banco)
 # =========================
 def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float, recebido: float, troco: float):
     largura = 40
@@ -1263,240 +1232,18 @@ def cupom_txt(itens: list, numero_venda: str, pagamento_ui: str, desconto: float
 
 
 # =========================
-# App (UI)
-# =========================
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-# inicializa tabelas
-inicializar_banco()
-inicializar_usuarios()
-
-if "cart" not in st.session_state:
-    st.session_state.cart = []
-
-st.title(APP_TITLE)
-
-# ✅ informações úteis (sem expor demais)
-st.caption(f"DB: {DB_PATH}")
-st.caption(f"Backups: {BACKUP_DIR} | Retenção: {BACKUP_RETENTION_DAYS} dias | Ativo: {('SIM' if BACKUP_ENABLED else 'NÃO')}")
-
-if IS_RENDER and (BACKUP_DIR or "").startswith("/tmp"):
-    st.warning("⚠️ Render Free: backups em /tmp podem SUMIR ao reiniciar. "
-               "Recomendado: usar Render Disk e setar BACKUP_DIR=/var/data/backups e DATABASE_PATH=/var/data/pdv.db")
-
-
-# =========================
-# Login (Sidebar)
-# =========================
-st.sidebar.divider()
-st.sidebar.header("🔐 Login")
-
-if "auth" not in st.session_state:
-    st.session_state.auth = None  # dict com user
-
-auth = st.session_state.auth
-
-if not auth:
-    with st.sidebar.form("login_form"):
-        u = st.text_input("Usuário", value="")
-        p = st.text_input("Senha", value="", type="password")
-        entrar = st.form_submit_button("Entrar")
-    if entrar:
-        user = autenticar(u, p)
-        if not user:
-            st.sidebar.error("Usuário/senha inválidos (ou usuário inativo).")
-        else:
-            st.session_state.auth = {
-                "username": user["username"],
-                "nome": user["nome"],
-                "role": user["role"],
-                "loja_id": user.get("loja_id"),  # ✅ importante pro multi-loja
-            }
-            st.rerun()
-
-    st.info("Faça login para usar o sistema.")
-    st.stop()
-else:
-    st.sidebar.success(f"Logado: {auth['username']} ({auth['role']})")
-    if st.sidebar.button("Sair"):
-        st.session_state.auth = None
-        # limpa loja selecionada ao sair
-        if "loja_id" in st.session_state:
-            del st.session_state["loja_id"]
-        st.rerun()
-
-# =========================
-# Seleção / Fixo de Loja
-# =========================
-role = st.session_state.auth["role"]
-user_loja_id = st.session_state.auth.get("loja_id")
-
-st.sidebar.divider()
-st.sidebar.header("🏪 Loja")
-
-df_lojas = listar_lojas_df()
-lojas_ativas = df_lojas[df_lojas["ativa"] == 1] if not df_lojas.empty else df_lojas
-
-if "loja_id" not in st.session_state:
-    # define default
-    if role == "ADMIN":
-        st.session_state.loja_id = int(lojas_ativas.iloc[0]["id"]) if not lojas_ativas.empty else 1
-    else:
-        # DONO/OPERADOR: loja fixa
-        st.session_state.loja_id = int(user_loja_id or 1)
-
-if role == "ADMIN":
-    opcoes = [f"{int(r.id)} — {r.nome}" for r in lojas_ativas.itertuples(index=False)]
-    ids = [int(r.id) for r in lojas_ativas.itertuples(index=False)]
-    try:
-        idx = ids.index(int(st.session_state.loja_id))
-    except Exception:
-        idx = 0
-
-    escolha = st.sidebar.selectbox("Selecionar loja", opcoes, index=idx)
-    loja_id_ativa = int(escolha.split("—")[0].strip())
-    st.session_state.loja_id = loja_id_ativa
-else:
-    loja_id_ativa = int(st.session_state.loja_id)
-    st.sidebar.info(f"Loja fixa: **{get_loja_nome(loja_id_ativa)}**")
-
-st.sidebar.caption(f"Loja ativa ID: {loja_id_ativa}")
-
-
-# =========================
-# Admin — Backup manual (UI)
-# =========================
-if role == "ADMIN":
-    st.sidebar.divider()
-    st.sidebar.header("🧰 Admin: Backup")
-
-    if st.sidebar.button("📦 Gerar backup agora"):
-        try:
-            bp = criar_backup_agora(prefix="pdv_manual")
-            if bp:
-                st.sidebar.success(f"Backup criado: {os.path.basename(bp)}")
-            else:
-                st.sidebar.warning("Backup não criado (DB ainda não existe ou backup desabilitado).")
-        except Exception as e:
-            st.sidebar.error(f"Falha ao gerar backup: {e}")
-
-    # Lista backups e permite baixar
-    try:
-        backups = listar_backups(prefix="pdv_manual")[:10]
-        if backups:
-            st.sidebar.caption("Últimos backups manuais:")
-            for fp in backups:
-                try:
-                    nome = os.path.basename(fp)
-                    with open(fp, "rb") as f:
-                        st.sidebar.download_button(
-                            label=f"⬇️ {nome}",
-                            data=f.read(),
-                            file_name=nome,
-                            mime="application/octet-stream",
-                        )
-                except Exception:
-                    pass
-        else:
-            st.sidebar.caption("Nenhum backup manual ainda.")
-    except Exception:
-        st.sidebar.caption("Não foi possível listar backups.")
-
-# =========================
-# Navegação por perfil
-# =========================
-paginas = ["🧾 Caixa (PDV)", "📈 Histórico"]
-
-# ✅ Agora OPERADOR também acessa Estoque e Relatórios
-if role in ("ADMIN", "DONO", "OPERADOR"):
-    paginas.insert(1, "📦 Estoque")
-    paginas.append("📅 Relatórios")
-
-# ✅ Só ADMIN gerencia usuários
-if role == "ADMIN":
-    paginas.append("👤 Usuários (Admin)")
-
-# ✅ Render/Streamlit: usa key + fallback pra nunca dar NameError
-if "pagina" not in st.session_state:
-    st.session_state.pagina = paginas[0]
-
-# garante que a página salva ainda existe nas opções atuais (ex: troca de role)
-if st.session_state.pagina not in paginas:
-    st.session_state.pagina = paginas[0]
-
-pagina = st.sidebar.radio("Navegação", paginas, index=paginas.index(st.session_state.pagina), key="pagina")
-
-# =========================
-# Caixa (sidebar abrir/fechar sempre visível) — MULTI-LOJA
-# =========================
-st.sidebar.divider()
-st.sidebar.header("Caixa (Abertura/Fechamento)")
-
-sess = get_sessao_aberta(loja_id_ativa)
-
-if not sess:
-    st.sidebar.error("CAIXA FECHADO")
-    with st.sidebar.form("abrir_caixa"):
-        operador = st.text_input("Operador (opcional)", value=auth.get("username", ""))
-        saldo_ini = st.number_input("Saldo inicial (fundo)", min_value=0.0, step=10.0, format="%.2f")
-        obs = st.text_input("Observação (opcional)", value="")
-        ok = st.form_submit_button("🔓 Abrir Caixa")
-    if ok:
-        try:
-            sid = abrir_caixa_db(loja_id_ativa, saldo_ini, operador, obs)
-            st.sidebar.success(f"Caixa aberto! Sessão #{sid}")
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(str(e))
-else:
-    sid, aberto_em, saldo_ini, operador = sess
-    st.sidebar.success(f"ABERTO — Sessão #{sid}")
-    st.sidebar.caption(f"Aberto em: {aberto_em}")
-    if operador:
-        st.sidebar.caption(f"Operador: {operador}")
-    st.sidebar.caption(f"Saldo inicial: R$ {brl(saldo_ini)}")
-
-    saldo_inicial, total_vendas, saldo_final_sistema, _ = totais_sessao(loja_id_ativa, int(sid))
-    st.sidebar.write(f"Vendas (sistema): **R$ {brl(total_vendas)}**")
-    st.sidebar.write(f"Final (sistema): **R$ {brl(saldo_final_sistema)}**")
-
-    rel = relatorio_pagamentos_sessao(loja_id_ativa, int(sid))
-    if rel:
-        df_rel = pd.DataFrame(rel, columns=["Forma", "Total"])
-        df_rel["Total"] = df_rel["Total"].map(lambda x: f"R$ {brl(x)}")
-        st.sidebar.dataframe(df_rel, use_container_width=True, hide_index=True)
-
-    with st.sidebar.form("fechar_caixa"):
-        contado = st.number_input(
-            "Valor contado (informado)",
-            min_value=0.0,
-            step=10.0,
-            value=float(saldo_final_sistema),
-            format="%.2f",
-        )
-        obs_f = st.text_input("Observação (opcional)", value="")
-        fechar = st.form_submit_button("🔒 Fechar Caixa")
-    if fechar:
-        try:
-            res = fechar_caixa_db(loja_id_ativa, int(sid), float(contado), obs_f)
-
-            # ✅ Backup no fechamento (ótimo para auditoria/restore)
-            try:
-                criar_backup_agora(prefix=f"pdv_close_loja{int(loja_id_ativa)}")
-            except Exception:
-                pass
-
-            st.sidebar.success("Caixa fechado!")
-            st.sidebar.write(f"Diferença: **R$ {brl(res['diferenca'])}**")
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(str(e))
-
-
-# =========================
 # Página: Caixa (PDV)
 # =========================
-if pagina.startswith("🧾"):
+# ✅ Atenção: agora esta parte vem DEPOIS do login/loja/navegação
+
+# ✅ sess da loja ativa (função correta é get_sessao_aberta)
+sess = None
+try:
+    sess = get_sessao_aberta(loja_id_ativa)
+except Exception:
+    sess = None
+
+if isinstance(pagina, str) and pagina.startswith("🧾"):
     col1, col2 = st.columns([2.2, 1], gap="large")
 
     with col1:
@@ -1510,31 +1257,41 @@ if pagina.startswith("🧾"):
                 codigo = st.text_input("Código", placeholder="Bipe o código / digite e Enter")
                 qtd = st.number_input("Quantidade", min_value=1, step=1, value=1)
                 add = st.form_submit_button("Adicionar")
+
             if add:
-                prod = buscar_produto_por_codigo(loja_id_ativa, codigo)
-                if not prod:
-                    st.error("Produto não encontrado pelo código (nesta loja).")
+                codigo = (codigo or "").strip()
+                if not codigo:
+                    st.warning("Digite/bipe um código.")
                 else:
-                    qtd = int(qtd)
-                    if qtd > prod["quantidade"]:
-                        st.error("Quantidade excede o estoque disponível.")
+                    prod = buscar_produto_por_codigo(loja_id_ativa, codigo)
+                    if not prod:
+                        st.error("Produto não encontrado pelo código (nesta loja).")
                     else:
-                        st.session_state.cart.append(
-                            {
-                                "codigo": prod["codigo"],
-                                "produto": prod["nome"],
-                                "preco_unit": float(prod["preco_venda"]),
-                                "preco_custo": float(prod["preco_custo"]),
-                                "qtd": int(qtd),
-                                "total_item": float(prod["preco_venda"]) * int(qtd),
-                            }
-                        )
-                        st.success("Item adicionado!")
+                        qtd = int(qtd)
+                        if qtd > int(prod.get("quantidade", 0)):
+                            st.error("Quantidade excede o estoque disponível.")
+                        else:
+                            st.session_state.cart.append(
+                                {
+                                    "codigo": str(prod["codigo"]),
+                                    "produto": str(prod["nome"]),
+                                    "preco_unit": float(prod["preco_venda"]),
+                                    "preco_custo": float(prod.get("preco_custo", 0.0)),
+                                    "qtd": int(qtd),
+                                    "total_item": float(prod["preco_venda"]) * int(qtd),
+                                }
+                            )
+                            st.success("Item adicionado!")
 
         st.subheader("Carrinho (editável)")
 
         if st.session_state.cart:
             df_cart = pd.DataFrame(st.session_state.cart)
+
+            for col in ["codigo", "produto", "preco_unit", "qtd", "preco_custo", "total_item"]:
+                if col not in df_cart.columns:
+                    df_cart[col] = 0
+
             df_edit = df_cart[["codigo", "produto", "preco_unit", "qtd"]].copy()
 
             edited = st.data_editor(
@@ -1550,23 +1307,24 @@ if pagina.startswith("🧾"):
                 key="cart_editor",
             )
 
-            # aplicar edições
             new_cart = []
             for i in range(len(edited)):
                 row = edited.iloc[i].to_dict()
-                preco = float(row["preco_unit"])
-                qtd = int(row["qtd"])
-                custo = float(df_cart.iloc[i]["preco_custo"]) if "preco_custo" in df_cart.columns else 0.0
+                preco = float(row.get("preco_unit", 0.0))
+                qtd_i = int(row.get("qtd", 1))
+                custo = float(df_cart.iloc[i].get("preco_custo", 0.0)) if i < len(df_cart) else 0.0
+
                 new_cart.append(
                     {
-                        "codigo": str(row["codigo"]),
-                        "produto": str(row["produto"]),
+                        "codigo": str(row.get("codigo", "")),
+                        "produto": str(row.get("produto", "")),
                         "preco_unit": preco,
                         "preco_custo": custo,
-                        "qtd": qtd,
-                        "total_item": preco * qtd,
+                        "qtd": qtd_i,
+                        "total_item": preco * qtd_i,
                     }
                 )
+
             st.session_state.cart = new_cart
 
             subtotal = float(sum(i["total_item"] for i in st.session_state.cart))
@@ -1598,20 +1356,26 @@ if pagina.startswith("🧾"):
         if not sess:
             st.info("Abra o caixa primeiro.")
         else:
-            sid, *_ = sess
-            forma_ui = st.selectbox("Forma de pagamento", ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"], index=0)
+            sid = int(sess[0])
+
+            forma_ui = st.selectbox(
+                "Forma de pagamento",
+                ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"],
+                index=0
+            )
 
             desconto_txt = st.text_input("Desconto (R$)", value="0")
-            recebido_txt = st.text_input("Recebido (somente dinheiro)", value="0", disabled=(forma_ui != "Dinheiro"))
+            recebido_txt = st.text_input(
+                "Recebido (somente dinheiro)",
+                value="0",
+                disabled=(forma_ui != "Dinheiro")
+            )
 
             df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
-            subtotal = float(df_cart["total_item"].sum()) if not df_cart.empty else 0.0
+            subtotal = float(df_cart["total_item"].sum()) if (not df_cart.empty and "total_item" in df_cart.columns) else 0.0
 
             desconto = to_float(desconto_txt)
-            if desconto < 0:
-                desconto = 0.0
-            if desconto > subtotal:
-                desconto = subtotal  # não deixa passar do subtotal
+            desconto = max(0.0, min(desconto, subtotal))
 
             total_liq = max(0.0, subtotal - float(desconto))
 
@@ -1624,25 +1388,17 @@ if pagina.startswith("🧾"):
             if forma_ui == "Dinheiro":
                 st.write(f"Troco: **R$ {brl(troco)}**")
 
-            # ✅ Guarda cupom na sessão pra não sumir ao recarregar
-            if "cupom_txt" not in st.session_state:
-                st.session_state.cupom_txt = None
-            if "cupom_nome" not in st.session_state:
-                st.session_state.cupom_nome = None
-            if "cupom_id" not in st.session_state:
-                st.session_state.cupom_id = None
-
             if st.button("✅ FINALIZAR"):
                 if not st.session_state.cart:
                     st.error("Carrinho vazio.")
                 else:
-                    # valida estoque (por loja) antes de gravar
+                    # valida estoque antes de gravar
                     for it in st.session_state.cart:
                         prod = buscar_produto_por_codigo(loja_id_ativa, it["codigo"])
                         if not prod:
                             st.error(f"Produto {it['codigo']} não encontrado no estoque desta loja.")
                             st.stop()
-                        if int(it["qtd"]) > int(prod["quantidade"]):
+                        if int(it["qtd"]) > int(prod.get("quantidade", 0)):
                             st.error(f"Estoque insuficiente para {it['produto']}.")
                             st.stop()
 
@@ -1652,7 +1408,6 @@ if pagina.startswith("🧾"):
 
                     forma_db = map_forma_pagamento(forma_ui)
 
-                    # ✅ venda + itens + baixa estoque (1 transação)
                     try:
                         venda_id = registrar_venda_completa_db(
                             loja_id=loja_id_ativa,
@@ -1671,7 +1426,8 @@ if pagina.startswith("🧾"):
                         st.error(f"Erro ao registrar venda: {e}")
                         st.stop()
 
-                    numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{venda_id:06d}"
+                    numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
+
                     txt = cupom_txt(
                         st.session_state.cart,
                         numero_venda,
@@ -1681,20 +1437,16 @@ if pagina.startswith("🧾"):
                         float(troco),
                     )
 
-                    # ✅ salva o cupom no session_state (pra aparecer e não sumir)
                     st.session_state.cupom_txt = txt
                     st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
                     st.session_state.cupom_id = venda_id
 
-                    # limpa carrinho
                     st.session_state.cart = []
+                    st.success("Venda registrada com sucesso!")
 
-                    # força recarregar pra mostrar cupom limpo + carrinho vazio
-                    st.rerun()
-
-            # ✅ Exibe cupom (se existir)
             if st.session_state.cupom_txt:
-                st.success(f"Venda registrada! Cupom/ID: {st.session_state.cupom_id}")
+                st.divider()
+                st.success(f"🧾 Cupom/ID: {st.session_state.cupom_id}")
 
                 st.text_area("Cupom gerado", value=st.session_state.cupom_txt, height=420)
 
@@ -1712,245 +1464,89 @@ if pagina.startswith("🧾"):
                     st.rerun()
 
 # =========================
-# Página: Estoque (ADMIN/DONO/OPERADOR)
+# Caixa (sidebar abrir/fechar sempre visível) — MULTI-LOJA
 # =========================
-elif pagina.startswith("📦"):
-    if role not in ("ADMIN", "DONO", "OPERADOR"):
-        st.error("Acesso negado. Apenas ADMIN, DONO ou OPERADOR pode acessar o Estoque.")
-        st.stop()
+st.sidebar.divider()
+st.sidebar.header("💰 Caixa (Abertura/Fechamento)")
 
-    st.subheader(f"📦 Estoque — {get_loja_nome(loja_id_ativa)}")
+# ✅ sempre recalcula a sessão atual da loja ativa
+sess = None
+try:
+    sess = get_sessao_aberta(loja_id_ativa)
+except Exception:
+    sess = None
 
-    cA, cB = st.columns([1, 1], gap="large")
+if not sess:
+    st.sidebar.error("CAIXA FECHADO")
+    with st.sidebar.form("abrir_caixa"):
+        operador = st.text_input("Operador (opcional)", value=st.session_state.auth.get("username", ""))
+        saldo_ini = st.number_input("Saldo inicial (fundo)", min_value=0.0, step=10.0, format="%.2f")
+        obs = st.text_input("Observação (opcional)", value="")
+        ok = st.form_submit_button("🔓 Abrir Caixa")
 
-    with cA:
-        st.markdown("### Cadastrar / Atualizar (por código)")
-        with st.form("produto_form"):
-            codigo = st.text_input("Código (barras)", value="")
-            nome = st.text_input("Produto", value="")
-            custo_txt = st.text_input("Preço de custo", value="0")
-            perc_txt = st.text_input("% Lucro (opcional)", value="")
-            venda_txt = st.text_input("Preço de venda", value="")
-            qtd = st.number_input("Quantidade", min_value=0, step=1, value=0)
-
-            auto_calc = st.checkbox("Calcular venda automaticamente (custo + %)", value=True)
-            salvar = st.form_submit_button("💾 Salvar (Upsert)")
-
-        if salvar:
-            try:
-                custo = to_float(custo_txt)
-                perc = to_float(perc_txt) if str(perc_txt).strip() else None
-
-                if auto_calc and (not str(venda_txt).strip()) and perc is not None:
-                    venda = float(custo) * (1.0 + float(perc) / 100.0)
-                else:
-                    venda = to_float(venda_txt)
-
-                upsert_produto(loja_id_ativa, codigo, nome, float(custo), float(venda), int(qtd))
-                st.success("Produto salvo!")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-        st.markdown("### Excluir produto")
-        cod_del = st.text_input("Código para excluir", value="", key="del_code")
-        if st.button("🗑️ Excluir"):
-            if not cod_del.strip():
-                st.warning("Informe um código.")
-            else:
-                excluir_produto(loja_id_ativa, cod_del.strip())
-                st.success("Excluído (se existia) nesta loja.")
-                st.rerun()
-
-    with cB:
-        st.markdown("### Buscar por código")
-        cod_busca = st.text_input("Código", value="", key="busca_code")
-        if st.button("🔎 Buscar"):
-            prod = buscar_produto_por_codigo(loja_id_ativa, cod_busca)
-            if not prod:
-                st.warning("Não encontrado nesta loja.")
-            else:
-                st.info(
-                    f"**{prod['nome']}**\n\n"
-                    f"Custo: R$ {brl(prod['preco_custo'])} | Venda: R$ {brl(prod['preco_venda'])} | Qtd: {prod['quantidade']}"
-                )
-
-    st.divider()
-    st.markdown("### Lista de produtos (desta loja)")
-    df = listar_produtos_df(loja_id_ativa)
-    if df.empty:
-        st.info("Sem produtos cadastrados nesta loja.")
-    else:
-        df_show = df.copy()
-        df_show["preco_custo"] = df_show["preco_custo"].map(lambda x: f"R$ {brl(x)}")
-        df_show["preco_venda"] = df_show["preco_venda"].map(lambda x: f"R$ {brl(x)}")
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-
-# =========================
-# Página: Histórico
-# =========================
-elif pagina.startswith("📈"):
-    st.subheader(f"📈 Histórico de Vendas (itens) — {get_loja_nome(loja_id_ativa)}")
-
-    filtro = st.text_input("Filtrar por produto (contém)", value="")
-    df = listar_vendas_itens_df(loja_id_ativa, filtro_produto=filtro)
-
-    if df.empty:
-        st.info("Sem vendas (ou filtro sem resultados) nesta loja.")
-    else:
-        total = float(df["total_item"].sum())
-        st.metric("Total vendido (itens filtrados)", f"R$ {brl(total)}")
-
-        df_show = df.copy()
-        df_show["preco_unit"] = df_show["preco_unit"].map(lambda x: f"R$ {brl(x)}")
-        df_show["total_item"] = df_show["total_item"].map(lambda x: f"R$ {brl(x)}")
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-
-# =========================
-# Página: Usuários (ADMIN)
-# =========================
-elif pagina.startswith("👤"):
-    if role != "ADMIN":
-        st.error("Acesso negado. Apenas ADMIN pode acessar Usuários.")
-        st.stop()
-
-    st.subheader("👤 Usuários (Admin)")
-
-    # ✅ BOTÃO: ZERAR LOJA (estoque/vendas/caixa)
-    st.divider()
-    st.markdown("### ⚠️ Manutenção (Admin) — Zerar dados de uma loja")
-    with st.form("zerar_loja_form"):
-        lojas_df = listar_lojas_df()
-        opcoes = [f"{int(r.id)} — {r.nome}" for r in lojas_df.itertuples(index=False)]
-        loja_sel = st.selectbox("Selecionar loja para ZERAR", opcoes, index=0)
-        confirmar = st.checkbox("Confirmo que quero apagar TODOS os dados da loja selecionada")
-        apagar = st.form_submit_button("🔥 ZERAR LOJA")
-
-    if apagar:
-        if not confirmar:
-            st.error("Você precisa confirmar antes de apagar.")
-        else:
-            loja_id_apagar = int(loja_sel.split("—")[0].strip())
-            try:
-                # ✅ backup dedicado antes de zerar
-                try:
-                    criar_backup_agora(prefix=f"pdv_before_reset_loja{int(loja_id_apagar)}")
-                except Exception:
-                    pass
-
-                zerar_loja(loja_id_apagar)
-                st.success("Loja zerada com sucesso!")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-    st.divider()
-    st.markdown("### Criar novo usuário")
-    with st.form("criar_usuario_form"):
-        nu = st.text_input("Username (ex: joao)", value="").strip().lower()
-        nn = st.text_input("Nome", value="")
-        nr = st.selectbox("Perfil", ["OPERADOR", "DONO", "ADMIN"], index=0)
-
-        # loja para dono/operador
-        lojas_ativas2 = listar_lojas_df()
-        lojas_ativas2 = lojas_ativas2[lojas_ativas2["ativa"] == 1] if not lojas_ativas2.empty else lojas_ativas2
-        opcoes_lojas = [f"{int(r.id)} — {r.nome}" for r in lojas_ativas2.itertuples(index=False)]
-        loja_sel2 = st.selectbox("Loja do usuário (Dono/Operador)", opcoes_lojas, index=0)
-        loja_sel_id = int(loja_sel2.split("—")[0].strip())
-
-        ns = st.text_input("Senha", value="", type="password")
-        nativo = st.checkbox("Ativo", value=True)
-        criar = st.form_submit_button("Criar")
-
-    if criar:
+    if ok:
         try:
-            loja_param = None if nr == "ADMIN" else loja_sel_id
-            criar_usuario(nu, nn, nr, ns, loja_id=loja_param, ativo=1 if nativo else 0)
-            st.success("Usuário criado!")
+            sid = abrir_caixa_db(loja_id_ativa, saldo_ini, operador, obs)
+            st.sidebar.success(f"Caixa aberto! Sessão #{sid}")
             st.rerun()
         except Exception as e:
-            st.error(str(e))
+            st.sidebar.error(str(e))
 
-    st.divider()
-    st.markdown("### Lista de usuários")
-    dfu = listar_usuarios_df()
-    st.dataframe(dfu, use_container_width=True, hide_index=True)
-
-    st.markdown("### Alterar perfil / loja / ativar-desativar")
-    with st.form("editar_usuario_form"):
-        eu = st.text_input("Username para editar", value="").strip().lower()
-        er = st.selectbox("Novo perfil", ["OPERADOR", "DONO", "ADMIN"], index=0)
-
-        lojas_ativas3 = listar_lojas_df()
-        lojas_ativas3 = lojas_ativas3[lojas_ativas3["ativa"] == 1] if not lojas_ativas3.empty else lojas_ativas3
-        opcoes_lojas3 = [f"{int(r.id)} — {r.nome}" for r in lojas_ativas3.itertuples(index=False)]
-        loja_edit = st.selectbox("Nova loja (Dono/Operador)", opcoes_lojas3, index=0)
-        loja_edit_id = int(loja_edit.split("—")[0].strip())
-
-        ea = st.checkbox("Ativo", value=True)
-        salvar = st.form_submit_button("Salvar alterações")
-
-    if salvar:
-        try:
-            loja_param = None if er == "ADMIN" else loja_edit_id
-            atualizar_usuario_role_ativo(eu, er, 1 if ea else 0, loja_id=loja_param)
-            st.success("Atualizado!")
-            st.rerun()
-        except Exception as e:
-            st.error(str(e))
-
-    st.markdown("### Trocar senha")
-    with st.form("senha_form"):
-        su = st.text_input("Username", value="").strip().lower()
-        sp = st.text_input("Nova senha", value="", type="password")
-        trocar = st.form_submit_button("Trocar senha")
-    if trocar:
-        try:
-            atualizar_senha(su, sp)
-            st.success("Senha alterada!")
-        except Exception as e:
-            st.error(str(e))
-
-
-# =========================
-# Página: Relatórios (ADMIN/DONO/OPERADOR)
-# =========================
 else:
-    if role not in ("ADMIN", "DONO", "OPERADOR"):
-        st.error("Acesso negado. Apenas ADMIN, DONO ou OPERADOR pode acessar Relatórios.")
-        st.stop()
+    sid, aberto_em, saldo_ini, operador = sess
 
-    st.subheader(f"📅 Relatórios — {get_loja_nome(loja_id_ativa)}")
+    st.sidebar.success(f"ABERTO — Sessão #{sid}")
+    st.sidebar.caption(f"Aberto em: {aberto_em}")
+    if operador:
+        st.sidebar.caption(f"Operador: {operador}")
+    st.sidebar.caption(f"Saldo inicial: R$ {brl(saldo_ini)}")
 
-    st.markdown("### Vendas por período (por cupom)")
-    c1, c2 = st.columns(2)
-    with c1:
-        d_ini = st.date_input("Data inicial", value=date.today().replace(day=1))
-    with c2:
-        d_fim = st.date_input("Data final", value=date.today())
+    saldo_inicial, total_vendas, saldo_final_sistema, _ = totais_sessao(loja_id_ativa, int(sid))
+    st.sidebar.write(f"Vendas (sistema): **R$ {brl(total_vendas)}**")
+    st.sidebar.write(f"Final (sistema): **R$ {brl(saldo_final_sistema)}**")
 
-    dt_ini = datetime(d_ini.year, d_ini.month, d_ini.day, 0, 0, 0)
-    dt_fim = datetime(d_fim.year, d_fim.month, d_fim.day, 23, 59, 59)
+    rel = relatorio_pagamentos_sessao(loja_id_ativa, int(sid))
+    if rel:
+        df_rel = pd.DataFrame(rel, columns=["Forma", "Total"])
+        df_rel["Total"] = df_rel["Total"].map(lambda x: f"R$ {brl(x)}")
+        st.sidebar.dataframe(df_rel, use_container_width=True, hide_index=True)
 
-    dfp = listar_vendas_por_periodo_df(loja_id_ativa, dt_ini, dt_fim)
-    if dfp.empty:
-        st.info("Sem vendas no período nesta loja.")
-    else:
-        total_periodo = float(dfp["total"].sum())
-        st.metric("Total do período", f"R$ {brl(total_periodo)}")
-        st.dataframe(dfp, use_container_width=True, hide_index=True)
+    with st.sidebar.form("fechar_caixa"):
+        contado = st.number_input(
+            "Valor contado (informado)",
+            min_value=0.0,
+            step=10.0,
+            value=float(saldo_final_sistema),
+            format="%.2f",
+        )
+        obs_f = st.text_input("Observação (opcional)", value="")
+        fechar = st.form_submit_button("🔒 Fechar Caixa")
 
-    st.divider()
-    st.markdown("### Total por dia do mês")
-    ano = st.number_input("Ano", min_value=2000, max_value=2100, value=date.today().year, step=1)
-    mes = st.number_input("Mês", min_value=1, max_value=12, value=date.today().month, step=1)
-    dfd, total_mes = totais_por_dia_do_mes(loja_id_ativa, int(ano), int(mes))
-    st.metric("Total do mês", f"R$ {brl(total_mes)}")
-    if dfd.empty:
-        st.info("Sem vendas no mês nesta loja.")
-    else:
-        dfd_show = dfd.copy()
-        dfd_show["total"] = dfd_show["total"].map(lambda x: f"R$ {brl(x)}")
-        st.dataframe(dfd_show, use_container_width=True, hide_index=True)
+    if fechar:
+        try:
+            res = fechar_caixa_db(loja_id_ativa, int(sid), float(contado), obs_f)
+
+            # ✅ Backup no fechamento (ótimo para auditoria/restore)
+            try:
+                criar_backup_agora(prefix=f"pdv_close_loja{int(loja_id_ativa)}")
+            except Exception:
+                pass
+
+            st.sidebar.success("Caixa fechado!")
+            st.sidebar.write(f"Diferença: **R$ {brl(res['diferenca'])}**")
+
+            # limpa carrinho e cupom ao fechar (opcional, mas evita confusão)
+            st.session_state.cart = []
+            st.session_state.cupom_txt = None
+            st.session_state.cupom_nome = None
+            st.session_state.cupom_id = None
+
+            st.rerun()
+        except Exception as e:
+            st.sidebar.error(str(e))
+
+# =========================
+# PÁGINAS (Obs: NÃO duplicar "Caixa" aqui)
+# =========================
+# ✅ A página "🧾 Caixa (PDV)" já está renderizada na Parte 3 (no final).
+# Aqui ficam apenas as OUTRAS páginas: Estoque, Histórico, Usuários, Relatórios.
