@@ -169,6 +169,106 @@ def auto_backup_se_precisar(prefix: str = "pdv"):
         # nunca travar o app por backup
         pass
 
+# =========================
+# ADMIN — ZERAR LOJA (pode ficar aqui embaixo do BACKUP)
+# =========================
+def zerar_loja_db(loja_id: int) -> dict:
+    """
+    Zera completamente uma loja:
+    - produtos (estoque)
+    - vendas_itens + vendas_cabecalho
+    - caixa_sessoes
+    - vendas (legado, se existir)
+
+    Segurança:
+    - BLOQUEIA se existir caixa ABERTO na loja.
+    - Transação única (BEGIN IMMEDIATE).
+    - NÃO depende de conectar() nem tabela_existe() (pode ficar logo após BACKUP).
+    """
+    loja_id = int(loja_id)
+
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        try:
+            conn.execute("PRAGMA foreign_keys = ON;")
+        except Exception:
+            pass
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+        except Exception:
+            pass
+
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+
+        # 1) Bloqueia se tiver caixa aberto
+        cur.execute(
+            """
+            SELECT id
+            FROM caixa_sessoes
+            WHERE loja_id = ? AND status = 'ABERTO'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (loja_id,),
+        )
+        row_aberto = cur.fetchone()
+        if row_aberto:
+            sid = int(row_aberto["id"])
+            conn.rollback()
+            raise RuntimeError(
+                f"Não pode zerar: existe CAIXA ABERTO na loja {loja_id} (Sessão #{sid}). Feche primeiro."
+            )
+
+        # 2) Contagens
+        cur.execute("SELECT COUNT(*) AS n FROM produtos WHERE loja_id = ?", (loja_id,))
+        n_prod = int((cur.fetchone()["n"] or 0))
+
+        cur.execute("SELECT COUNT(*) AS n FROM vendas_cabecalho WHERE loja_id = ?", (loja_id,))
+        n_vendas = int((cur.fetchone()["n"] or 0))
+
+        cur.execute("SELECT COUNT(*) AS n FROM vendas_itens WHERE loja_id = ?", (loja_id,))
+        n_itens = int((cur.fetchone()["n"] or 0))
+
+        cur.execute("SELECT COUNT(*) AS n FROM caixa_sessoes WHERE loja_id = ?", (loja_id,))
+        n_caixas = int((cur.fetchone()["n"] or 0))
+
+        # 3) Apaga em ordem segura
+        cur.execute("DELETE FROM vendas_itens WHERE loja_id = ?", (loja_id,))
+        cur.execute("DELETE FROM vendas_cabecalho WHERE loja_id = ?", (loja_id,))
+        cur.execute("DELETE FROM caixa_sessoes WHERE loja_id = ?", (loja_id,))
+
+        # tabela legado "vendas" pode existir
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendas'")
+        if cur.fetchone():
+            cur.execute("DELETE FROM vendas WHERE loja_id = ?", (loja_id,))
+
+        cur.execute("DELETE FROM produtos WHERE loja_id = ?", (loja_id,))
+
+        conn.commit()
+
+        return {
+            "loja_id": loja_id,
+            "produtos_apagados": n_prod,
+            "vendas_apagadas": n_vendas,
+            "itens_apagados": n_itens,
+            "caixas_apagados": n_caixas,
+        }
+
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 
 # =========================
 # Helpers (DB / Datas)
