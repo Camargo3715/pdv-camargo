@@ -1462,6 +1462,96 @@ if isinstance(pagina, str) and pagina.startswith("🧾"):
                     st.session_state.cupom_nome = None
                     st.session_state.cupom_id = None
                     st.rerun()
+# =========================
+# Registrar venda completa (cabecalho + itens + baixa estoque)
+# =========================
+def registrar_venda_completa_db(
+    loja_id: int,
+    sessao_id: int,
+    itens: list,
+    forma_pagamento: str,
+    subtotal: float,
+    desconto: float,
+    total: float,
+    recebido: float,
+    troco: float,
+    status: str = "FINALIZADA",
+    baixar_estoque: bool = True,
+):
+    if not itens:
+        raise RuntimeError("Nenhum item informado.")
+
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+
+        # 1️⃣ Inserir cabeçalho
+        cur.execute(
+            """
+            INSERT INTO vendas_cabecalho
+            (loja_id, datahora, sessao_id, subtotal, desconto, total,
+             forma_pagamento, recebido, troco, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(loja_id),
+                agora_iso(),
+                int(sessao_id),
+                float(subtotal),
+                float(desconto),
+                float(total),
+                forma_pagamento,
+                float(recebido),
+                float(troco),
+                status,
+            ),
+        )
+
+        venda_id = cur.lastrowid
+
+        # 2️⃣ Inserir itens
+        for it in itens:
+            cur.execute(
+                """
+                INSERT INTO vendas_itens
+                (loja_id, venda_id, codigo, produto,
+                 preco_unit, preco_custo, qtd, total_item)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(loja_id),
+                    int(venda_id),
+                    it.get("codigo"),
+                    it.get("produto"),
+                    float(it.get("preco_unit", 0)),
+                    float(it.get("preco_custo", 0)),
+                    int(it.get("qtd", 0)),
+                    float(it.get("total_item", 0)),
+                ),
+            )
+
+            # 3️⃣ Baixar estoque (se habilitado)
+            if baixar_estoque:
+                cur.execute(
+                    """
+                    UPDATE produtos
+                    SET quantidade = quantidade - ?
+                    WHERE loja_id = ? AND codigo = ? AND quantidade >= ?
+                    """,
+                    (
+                        int(it.get("qtd", 0)),
+                        int(loja_id),
+                        it.get("codigo"),
+                        int(it.get("qtd", 0)),
+                    ),
+                )
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    raise RuntimeError(f"Estoque insuficiente para {it.get('produto')}.")
+
+        conn.commit()
+
+    return int(venda_id)
 
 # =========================
 # Caixa (sidebar abrir/fechar sempre visível) — MULTI-LOJA
