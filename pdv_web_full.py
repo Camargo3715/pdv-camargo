@@ -1454,9 +1454,20 @@ if "cupom_id" not in st.session_state:
     st.session_state.cupom_id = None
 
 # =========================
+# PÁGINAS — FINAL DO ARQUIVO
+# =========================
+
+# 🔁 Recarrega sessão do caixa sempre que trocar página/loja
+try:
+    sess = get_sessao_aberta(loja_id_ativa)
+except Exception:
+    sess = None
+
+
+# =========================
 # Página: Caixa (PDV)
 # =========================
-if isinstance(pagina, str) and pagina.startswith("🧾"):
+if pagina == "🧾 Caixa (PDV)":
     col1, col2 = st.columns([2.2, 1], gap="large")
 
     with col1:
@@ -1480,8 +1491,8 @@ if isinstance(pagina, str) and pagina.startswith("🧾"):
                     if not prod:
                         st.error("Produto não encontrado pelo código (nesta loja).")
                     else:
-                        qtd_i = int(qtd)
-                        if qtd_i > int(prod.get("quantidade", 0)):
+                        qtd = int(qtd)
+                        if qtd > int(prod.get("quantidade", 0)):
                             st.error("Quantidade excede o estoque disponível.")
                         else:
                             st.session_state.cart.append(
@@ -1490,8 +1501,8 @@ if isinstance(pagina, str) and pagina.startswith("🧾"):
                                     "produto": str(prod["nome"]),
                                     "preco_unit": float(prod["preco_venda"]),
                                     "preco_custo": float(prod.get("preco_custo", 0.0)),
-                                    "qtd": qtd_i,
-                                    "total_item": float(prod["preco_venda"]) * qtd_i,
+                                    "qtd": int(qtd),
+                                    "total_item": float(prod["preco_venda"]) * int(qtd),
                                 }
                             )
                             st.success("Item adicionado!")
@@ -1521,13 +1532,12 @@ if isinstance(pagina, str) and pagina.startswith("🧾"):
                 key="cart_editor",
             )
 
-            # aplica edições
             new_cart = []
             for i in range(len(edited)):
                 row = edited.iloc[i].to_dict()
                 preco = float(row.get("preco_unit", 0.0))
                 qtd_i = int(row.get("qtd", 1))
-                custo = float(df_cart.iloc[i].get("preco_custo", 0.0))
+                custo = float(df_cart.iloc[i].get("preco_custo", 0.0)) if i < len(df_cart) else 0.0
 
                 new_cart.append(
                     {
@@ -1571,17 +1581,28 @@ if isinstance(pagina, str) and pagina.startswith("🧾"):
         if not sess:
             st.info("Abra o caixa primeiro.")
         else:
-            sid = int(sess[0])
-            forma_ui = st.selectbox("Forma de pagamento", ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"], index=0)
+            # sess pode ser tuple ou Row
+            sid = int(sess["id"]) if isinstance(sess, dict) or hasattr(sess, "keys") else int(sess[0])
+
+            forma_ui = st.selectbox(
+                "Forma de pagamento",
+                ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"],
+                index=0
+            )
 
             desconto_txt = st.text_input("Desconto (R$)", value="0")
-            recebido_txt = st.text_input("Recebido (somente dinheiro)", value="0", disabled=(forma_ui != "Dinheiro"))
+            recebido_txt = st.text_input(
+                "Recebido (somente dinheiro)",
+                value="0",
+                disabled=(forma_ui != "Dinheiro")
+            )
 
             df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
             subtotal = float(df_cart["total_item"].sum()) if (not df_cart.empty and "total_item" in df_cart.columns) else 0.0
 
-            desconto = max(0.0, min(to_float(desconto_txt), subtotal))
-            total_liq = max(0.0, subtotal - desconto)
+            desconto = to_float(desconto_txt)
+            desconto = max(0.0, min(desconto, subtotal))
+            total_liq = max(0.0, subtotal - float(desconto))
 
             recebido = to_float(recebido_txt) if forma_ui == "Dinheiro" else 0.0
             troco = max(0.0, recebido - total_liq) if forma_ui == "Dinheiro" else 0.0
@@ -1615,14 +1636,14 @@ if isinstance(pagina, str) and pagina.startswith("🧾"):
                     try:
                         venda_id = registrar_venda_completa_db(
                             loja_id=loja_id_ativa,
-                            sessao_id=sid,
+                            sessao_id=int(sid),
                             itens=st.session_state.cart,
                             forma_pagamento=forma_db,
                             subtotal=subtotal,
-                            desconto=desconto,
+                            desconto=float(desconto),
                             total=total_liq,
-                            recebido=recebido,
-                            troco=troco,
+                            recebido=float(recebido),
+                            troco=float(troco),
                             status="FINALIZADA",
                             baixar_estoque=True,
                         )
@@ -1636,23 +1657,19 @@ if isinstance(pagina, str) and pagina.startswith("🧾"):
                     st.session_state.cupom_txt = txt
                     st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
                     st.session_state.cupom_id = venda_id
-
                     st.session_state.cart = []
                     st.rerun()
 
             if st.session_state.cupom_txt:
                 st.divider()
-                st.success(f"Venda registrada! Cupom/ID: {st.session_state.cupom_id}")
-
+                st.success(f"🧾 Cupom/ID: {st.session_state.cupom_id}")
                 st.text_area("Cupom gerado", value=st.session_state.cupom_txt, height=420)
-
                 st.download_button(
                     "⬇️ Baixar Cupom TXT",
                     data=st.session_state.cupom_txt.encode("utf-8"),
                     file_name=st.session_state.cupom_nome or "cupom.txt",
                     mime="text/plain",
                 )
-
                 if st.button("🆕 Nova venda (limpar cupom)"):
                     st.session_state.cupom_txt = None
                     st.session_state.cupom_nome = None
@@ -1663,31 +1680,143 @@ if isinstance(pagina, str) and pagina.startswith("🧾"):
 # =========================
 # Página: Estoque
 # =========================
-elif isinstance(pagina, str) and pagina.startswith("📦"):
-    # ... mantenha seu código do Estoque aqui (o seu está ok)
+elif pagina == "📦 Estoque":
     st.subheader(f"📦 Estoque — {get_loja_nome(loja_id_ativa)}")
-    # (cole aqui o seu bloco de estoque)
+
+    cA, cB = st.columns([1, 1], gap="large")
+
+    with cA:
+        st.markdown("### Cadastrar / Atualizar (por código)")
+        with st.form("produto_form"):
+            codigo = st.text_input("Código (barras)", value="")
+            nome = st.text_input("Produto", value="")
+            custo_txt = st.text_input("Preço de custo", value="0")
+            perc_txt = st.text_input("% Lucro (opcional)", value="")
+            venda_txt = st.text_input("Preço de venda", value="")
+            qtd = st.number_input("Quantidade", min_value=0, step=1, value=0)
+
+            auto_calc = st.checkbox("Calcular venda automaticamente (custo + %)", value=True)
+            salvar = st.form_submit_button("💾 Salvar (Upsert)")
+
+        if salvar:
+            try:
+                custo = to_float(custo_txt)
+                perc = to_float(perc_txt) if str(perc_txt).strip() else None
+
+                if auto_calc and (not str(venda_txt).strip()) and perc is not None:
+                    venda = float(custo) * (1.0 + float(perc) / 100.0)
+                else:
+                    venda = to_float(venda_txt)
+
+                upsert_produto(loja_id_ativa, codigo, nome, float(custo), float(venda), int(qtd))
+                st.success("Produto salvo!")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+        st.markdown("### Excluir produto")
+        cod_del = st.text_input("Código para excluir", value="", key="del_code")
+        if st.button("🗑️ Excluir"):
+            if not cod_del.strip():
+                st.warning("Informe um código.")
+            else:
+                excluir_produto(loja_id_ativa, cod_del.strip())
+                st.success("Excluído (se existia) nesta loja.")
+                st.rerun()
+
+    with cB:
+        st.markdown("### Buscar por código")
+        cod_busca = st.text_input("Código", value="", key="busca_code")
+        if st.button("🔎 Buscar"):
+            prod = buscar_produto_por_codigo(loja_id_ativa, cod_busca)
+            if not prod:
+                st.warning("Não encontrado nesta loja.")
+            else:
+                st.info(
+                    f"**{prod['nome']}**\n\n"
+                    f"Custo: R$ {brl(prod['preco_custo'])} | Venda: R$ {brl(prod['preco_venda'])} | Qtd: {prod['quantidade']}"
+                )
+
+    st.divider()
+    st.markdown("### Lista de produtos (desta loja)")
+    df = listar_produtos_df(loja_id_ativa)
+    if df.empty:
+        st.info("Sem produtos cadastrados nesta loja.")
+    else:
+        df_show = df.copy()
+        df_show["preco_custo"] = df_show["preco_custo"].map(lambda x: f"R$ {brl(x)}")
+        df_show["preco_venda"] = df_show["preco_venda"].map(lambda x: f"R$ {brl(x)}")
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
 
 
 # =========================
 # Página: Histórico
 # =========================
-elif isinstance(pagina, str) and pagina.startswith("📈"):
-    st.subheader(f"📈 Histórico — {get_loja_nome(loja_id_ativa)}")
-    # (cole aqui o seu bloco de histórico)
+elif pagina == "📈 Histórico":
+    st.subheader(f"📈 Histórico de Vendas (itens) — {get_loja_nome(loja_id_ativa)}")
 
+    filtro = st.text_input("Filtrar por produto (contém)", value="")
+    df = listar_vendas_itens_df(loja_id_ativa, filtro_produto=filtro)
 
-# =========================
-# Página: Usuários
-# =========================
-elif isinstance(pagina, str) and pagina.startswith("👤"):
-    st.subheader("👤 Usuários (Admin)")
-    # (cole aqui o seu bloco de usuários)
+    if df.empty:
+        st.info("Sem vendas (ou filtro sem resultados) nesta loja.")
+    else:
+        total = float(df["total_item"].sum())
+        st.metric("Total vendido (itens filtrados)", f"R$ {brl(total)}")
+
+        df_show = df.copy()
+        df_show["preco_unit"] = df_show["preco_unit"].map(lambda x: f"R$ {brl(x)}")
+        df_show["total_item"] = df_show["total_item"].map(lambda x: f"R$ {brl(x)}")
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
 
 
 # =========================
 # Página: Relatórios
 # =========================
-else:
+elif pagina == "📅 Relatórios":
     st.subheader(f"📅 Relatórios — {get_loja_nome(loja_id_ativa)}")
-    # (cole aqui o seu bloco de relatórios)
+
+    st.markdown("### Vendas por período (por cupom)")
+    c1, c2 = st.columns(2)
+    with c1:
+        d_ini = st.date_input("Data inicial", value=date.today().replace(day=1))
+    with c2:
+        d_fim = st.date_input("Data final", value=date.today())
+
+    dt_ini = datetime(d_ini.year, d_ini.month, d_ini.day, 0, 0, 0)
+    dt_fim = datetime(d_fim.year, d_fim.month, d_fim.day, 23, 59, 59)
+
+    dfp = listar_vendas_por_periodo_df(loja_id_ativa, dt_ini, dt_fim)
+    if dfp.empty:
+        st.info("Sem vendas no período nesta loja.")
+    else:
+        total_periodo = float(dfp["total"].sum())
+        st.metric("Total do período", f"R$ {brl(total_periodo)}")
+        st.dataframe(dfp, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("### Total por dia do mês")
+    ano = st.number_input("Ano", min_value=2000, max_value=2100, value=date.today().year, step=1)
+    mes = st.number_input("Mês", min_value=1, max_value=12, value=date.today().month, step=1)
+
+    dfd, total_mes = totais_por_dia_do_mes(loja_id_ativa, int(ano), int(mes))
+    st.metric("Total do mês", f"R$ {brl(total_mes)}")
+
+    if dfd.empty:
+        st.info("Sem vendas no mês nesta loja.")
+    else:
+        dfd_show = dfd.copy()
+        dfd_show["total"] = dfd_show["total"].map(lambda x: f"R$ {brl(x)}")
+        st.dataframe(dfd_show, use_container_width=True, hide_index=True)
+
+
+# =========================
+# Página: Usuários (Admin)
+# =========================
+elif pagina == "👤 Usuários (Admin)":
+    if (st.session_state.auth.get("tipo") or "").lower() != "admin" and (st.session_state.auth.get("role") or "") != "ADMIN":
+        st.error("Acesso negado. Apenas ADMIN pode acessar Usuários.")
+        st.stop()
+
+    st.subheader("👤 Usuários (Admin)")
+    st.dataframe(listar_usuarios_df(), use_container_width=True, hide_index=True)
