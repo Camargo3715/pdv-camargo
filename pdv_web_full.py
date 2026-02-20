@@ -1409,6 +1409,7 @@ loja_id_ativa = _to_int(st.session_state.loja_id_ativa, 1)
 paginas = ["🧾 Caixa (PDV)", "📦 Estoque", "📈 Histórico", "📅 Relatórios"]
 if tipo == "admin":
     paginas.append("👤 Usuários (Admin)")
+    paginas.append("🧨 Zerar Loja (Admin)")
 
 if st.session_state.pagina not in paginas:
     st.session_state.pagina = "🧾 Caixa (PDV)"
@@ -1847,4 +1848,44 @@ elif pagina == "👤 Usuários (Admin)":
             st.success("Usuário criado!")
             st.rerun()
         except Exception as e:
+            st.error(str(e)) 
+
+# Página: Zerar Loja (Admin)
+elif pagina == "🧨 Zerar Loja (Admin)":
+    if tipo != "admin":
+        st.error("Acesso negado. Apenas ADMIN pode acessar.")
+        st.stop()
+
+    st.subheader("🧨 Zerar Loja (Admin)")
+    st.warning("⚠️ Isso APAGA tudo da loja selecionada: ESTOQUE + VENDAS + CAIXA.")
+    st.write(f"Loja selecionada: **{get_loja_nome(loja_id_ativa)} (ID {loja_id_ativa})**")
+
+    criar_backup = st.checkbox("Criar backup antes de zerar (recomendado)", value=True)
+    confirm = st.text_input("Digite exatamente: ZERAR", value="")
+
+    if st.button("🧨 ZERAR AGORA", type="primary"):
+        if confirm.strip().upper() != "ZERAR":
+            st.error("Confirmação incorreta. Digite ZERAR.")
+            st.stop()
+
+        if criar_backup:
+            try:
+                criar_backup_agora(prefix=f"pdv_before_reset_loja{int(loja_id_ativa)}")
+            except Exception:
+                pass
+
+        try:
+            res = zerar_loja_db(int(loja_id_ativa))
+        except Exception as e:
             st.error(str(e))
+            st.stop()
+
+        # limpa estados locais
+        st.session_state.cart = []
+        st.session_state.cupom_txt = None
+        st.session_state.cupom_nome = None
+        st.session_state.cupom_id = None
+
+        st.success("✅ Loja zerada com sucesso!")
+        st.json(res)
+        st.rerun()
