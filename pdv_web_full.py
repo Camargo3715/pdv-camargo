@@ -1475,7 +1475,7 @@ else:
     if rel:
         df_rel = pd.DataFrame(rel, columns=["Forma", "Total"])
         df_rel["Total"] = df_rel["Total"].map(lambda x: f"R$ {brl(x)}")
-        st.sidebar.dataframe(df_rel, use_container_width=True, hide_index=True)
+        st.sidebar.dataframe(df_rel, width="stretch", hide_index=True)
 
     with st.sidebar.form("fechar_caixa"):
         contado = st.number_input("Valor contado (informado)", min_value=0.0, step=10.0, value=float(saldo_final_sistema), format="%.2f")
@@ -1562,7 +1562,7 @@ if pagina == "🧾 Caixa (PDV)":
 
             edited = st.data_editor(
                 df_edit,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 num_rows="fixed",
                 disabled=["codigo", "produto"],
@@ -1765,7 +1765,7 @@ elif pagina == "📦 Estoque":
         df_show = df.copy()
         df_show["preco_custo"] = df_show["preco_custo"].map(lambda x: f"R$ {brl(x)}")
         df_show["preco_venda"] = df_show["preco_venda"].map(lambda x: f"R$ {brl(x)}")
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
+        st.dataframe(df_show, width="stretch", hide_index=True)
 
 # Página: Histórico
 elif pagina == "📈 Histórico":
@@ -1782,7 +1782,7 @@ elif pagina == "📈 Histórico":
         df_show = df.copy()
         df_show["preco_unit"] = df_show["preco_unit"].map(lambda x: f"R$ {brl(x)}")
         df_show["total_item"] = df_show["total_item"].map(lambda x: f"R$ {brl(x)}")
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
+        st.dataframe(df_show, width="stretch", hide_index=True)
 
 # Página: Relatórios
 elif pagina == "📅 Relatórios":
@@ -1804,7 +1804,7 @@ elif pagina == "📅 Relatórios":
     else:
         total_periodo = float(dfp["total"].sum())
         st.metric("Total do período", f"R$ {brl(total_periodo)}")
-        st.dataframe(dfp, use_container_width=True, hide_index=True)
+        st.dataframe(dfp, width="stretch", hide_index=True)
 
     st.divider()
     st.markdown("### Total por dia do mês")
@@ -1819,7 +1819,7 @@ elif pagina == "📅 Relatórios":
     else:
         dfd_show = dfd.copy()
         dfd_show["total"] = dfd_show["total"].map(lambda x: f"R$ {brl(x)}")
-        st.dataframe(dfd_show, use_container_width=True, hide_index=True)
+        st.dataframe(dfd_show, width="stretch", hide_index=True)
 
 # Página: Usuários (Admin)
 elif pagina == "👤 Usuários (Admin)":
@@ -1828,7 +1828,7 @@ elif pagina == "👤 Usuários (Admin)":
         st.stop()
 
     st.subheader("👤 Usuários (Admin)")
-    st.dataframe(listar_usuarios_df(), use_container_width=True, hide_index=True)
+    st.dataframe(listar_usuarios_df(), width="stretch", hide_index=True)
 
     st.divider()
     st.markdown("### Criar novo usuário")
