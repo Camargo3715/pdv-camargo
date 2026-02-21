@@ -1763,12 +1763,95 @@ elif pagina == "📦 Estoque":
     if df.empty:
         st.info("Sem produtos cadastrados nesta loja.")
     else:
+        # Mostra tabela formatada pro usuário
         df_show = df.copy()
         df_show["preco_custo"] = df_show["preco_custo"].map(lambda x: f"R$ {brl(x)}")
         df_show["preco_venda"] = df_show["preco_venda"].map(lambda x: f"R$ {brl(x)}")
         st.dataframe(df_show, width="stretch", hide_index=True)
 
-# Página: Histórico
+        # =========================
+        # ✅ NOVO: EDITAR PRODUTO EXISTENTE
+        # =========================
+        st.divider()
+        st.markdown("### ✏️ Editar produto já cadastrado")
+
+        df_edit = df.copy()
+
+        filtro = st.text_input("Buscar para editar (código ou nome)", value="", key="edit_filtro")
+        if filtro.strip():
+            f = filtro.strip().lower()
+            df_edit = df_edit[
+                df_edit["codigo"].astype(str).str.lower().str.contains(f) |
+                df_edit["nome"].astype(str).str.lower().str.contains(f)
+            ]
+
+        if df_edit.empty:
+            st.info("Nenhum produto encontrado com esse filtro.")
+        else:
+            # opções amigáveis
+            df_edit["__opt__"] = df_edit.apply(
+                lambda r: f"{r['codigo']} — {r['nome']} (Qtd: {int(r['quantidade'])})",
+                axis=1
+            )
+            opt = st.selectbox("Selecione o produto", df_edit["__opt__"].tolist(), key="edit_select")
+
+            row = df_edit[df_edit["__opt__"] == opt].iloc[0]
+
+            codigo_sel = str(row["codigo"])
+            nome_sel = str(row["nome"])
+            custo_sel = float(row["preco_custo"])
+            venda_sel = float(row["preco_venda"])
+            qtd_sel = int(row["quantidade"])
+
+            with st.form("form_editar_produto_existente", clear_on_submit=False):
+                c1, c2 = st.columns(2, gap="large")
+
+                with c1:
+                    st.caption("Dados do produto")
+                    codigo_novo = st.text_input("Código", value=codigo_sel)
+                    nome_novo = st.text_input("Nome", value=nome_sel)
+                    custo_novo = st.number_input("Preço de custo", min_value=0.0, value=custo_sel, step=0.01)
+                    venda_novo = st.number_input("Preço de venda", min_value=0.0, value=venda_sel, step=0.01)
+
+                with c2:
+                    st.caption("Quantidade em estoque")
+                    modo_qtd = st.radio(
+                        "Como ajustar a quantidade?",
+                        ["Definir quantidade exata", "Somar (+) / Subtrair (-)"],
+                        index=0,
+                        key="modo_qtd"
+                    )
+
+                    if modo_qtd == "Definir quantidade exata":
+                        qtd_final = st.number_input("Quantidade final", min_value=0, value=qtd_sel, step=1)
+                    else:
+                        delta = st.number_input("Alteração (use negativo para saída)", value=0, step=1)
+                        qtd_final = max(0, qtd_sel + int(delta))
+                        st.info(f"Quantidade atual: {qtd_sel} → Quantidade final: {qtd_final}")
+
+                salvar_edit = st.form_submit_button("💾 Salvar alterações")
+
+            if salvar_edit:
+                try:
+                    if not codigo_novo.strip():
+                        st.warning("Código não pode ficar vazio.")
+                    elif not nome_novo.strip():
+                        st.warning("Nome não pode ficar vazio.")
+                    else:
+                        # Reaproveita seu upsert (atualiza o produto do mesmo código)
+                        # ⚠️ Se você mudar o código aqui, dependendo do seu upsert, pode criar outro registro.
+                        upsert_produto(
+                            loja_id_ativa,
+                            codigo_novo.strip(),
+                            nome_novo.strip(),
+                            float(custo_novo),
+                            float(venda_novo),
+                            int(qtd_final)
+                        )
+                        st.success("Produto atualizado ✅")
+                        st.rerun()
+                except Exception as e:
+                    st.error(str(e))# Página: Histórico
 elif pagina == "📈 Histórico":
     st.subheader(f"📈 Histórico de Vendas (itens) — {get_loja_nome(loja_id_ativa)}")
     filtro = st.text_input("Filtrar por produto (contém)", value="")
