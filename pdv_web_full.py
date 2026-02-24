@@ -3,6 +3,7 @@
 # ✅ Multi-loja: 1 banco, dados separados por loja_id (estoque/vendas/caixa/usuários)
 # ✅ Admin: gestão de usuários + seleção de loja + opção (futura) de zerar loja com segurança
 # ✅ Backup automático (SQLite): diário + retenção + backup seguro via SQLite backup API
+# ✅ Caixa: autocomplete "igual Google" com streamlit-searchbox (fora do st.form)
 
 import os
 import sqlite3
@@ -15,6 +16,7 @@ from datetime import datetime, timedelta, date
 
 import streamlit as st
 import pandas as pd
+from streamlit_searchbox import st_searchbox
 
 APP_TITLE = "PDV Camargo Celulares — Web"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1545,62 +1547,123 @@ try:
 except Exception:
     sess = None
 
+
+# =========================
+# ✅ BUSCA PARA AUTOCOMPLETE (evita NameError)
+# =========================
+def buscar_produtos_sugestoes(loja_id: int, termo: str, limit: int = 10):
+    termo = (termo or "").strip()
+    if not termo:
+        return []
+
+    like = f"%{termo}%"
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT codigo, nome, preco_venda, quantidade
+            FROM produtos
+            WHERE loja_id = ?
+              AND (nome LIKE ? OR codigo LIKE ?)
+            ORDER BY
+              CASE
+                WHEN lower(nome) LIKE lower(?) THEN 0
+                WHEN lower(codigo) LIKE lower(?) THEN 1
+                ELSE 2
+              END,
+              nome ASC
+            LIMIT ?
+            """,
+            (int(loja_id), like, like, f"{termo.lower()}%", f"{termo.lower()}%", int(limit)),
+        )
+        rows = cur.fetchall()
+
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "codigo": str(r["codigo"]),
+                "nome": str(r["nome"]),
+                "preco_venda": float(r["preco_venda"] or 0.0),
+                "quantidade": int(r["quantidade"] or 0),
+            }
+        )
+    return out
+
+
 # Página: Caixa (PDV)
 if pagina == "🧾 Caixa (PDV)":
     col1, col2 = st.columns([2.2, 1], gap="large")
 
     with col1:
         st.subheader(f"🧾 Caixa — {get_loja_nome(loja_id_ativa)}")
-        st.caption("Lançar item por código")
+        st.caption("Digite para buscar no estoque (igual Google) ou bipe o código")
 
         if not sess:
             st.info("Abra o caixa na barra lateral para vender.")
         else:
-            with st.form("add_item", clear_on_submit=True):
-                # ✅ agora aceita digitar "claro" e sugere itens
-                codigo = st.text_input(
-                    "Código",
-                    placeholder="Bipe o código / digite e Enter (ou digite: claro, vivo...)",
-                    key="caixa_codigo"
-                )
-                qtd = st.number_input("Quantidade", min_value=1, step=1, value=1, key="caixa_qtd")
+            # 🔎 callback do autocomplete (executa enquanto digita)
+            def _search_produtos(query: str):
+                q = (query or "").strip()
+                if len(q) < 2:
+                    return []
+                sugestoes = buscar_produtos_sugestoes(loja_id_ativa, q, limit=15)
+                return [
+                    f"{p['nome']} — cód {p['codigo']} | Est: {p['quantidade']} | R$ {brl(p['preco_venda'])}"
+                    for p in sugestoes
+                ]
 
-                termo = (st.session_state.get("caixa_codigo") or "").strip()
-                codigo_final = termo  # padrão: usa o que digitou (scanner)
+            # ✅ AUTOCOMPLETE (fora de st.form) -> funciona enquanto digita
+            escolha_label = st_searchbox(
+                _search_produtos,
+                key="caixa_autocomplete",
+                placeholder="Comece a digitar (ex: claro, vivo, capinha...)",
+            )
 
-                # ✅ só sugere se tiver pelo menos 2 caracteres
-                sugestoes = buscar_produtos_sugestoes(loja_id_ativa, termo, limit=10) if len(termo) >= 2 else []
+            # ✅ campo opcional para leitor de código
+            codigo_bipe = st.text_input(
+                "Código (opcional — leitor)",
+                placeholder="Bipe o código aqui se preferir",
+                key="caixa_codigo_bipe",
+            )
 
-                if sugestoes:
-                    st.caption("Sugestões do estoque (selecione):")
-                    mapa = {}
-                    labels = []
-                    for p in sugestoes:
-                        label = f"{p['nome']} — cód {p['codigo']} | Est: {p['quantidade']} | R$ {brl(p['preco_venda'])}"
-                        labels.append(label)
-                        mapa[label] = p["codigo"]
+            qtd = st.number_input(
+                "Quantidade",
+                min_value=1,
+                step=1,
+                value=1,
+                key="caixa_qtd",
+            )
 
-                    escolha = st.selectbox("Opções", labels, key="caixa_sugestao")
-                    usar = st.checkbox("Usar sugestão selecionada", value=True, key="caixa_usar_sugestao")
-
-                    if usar and escolha:
-                        codigo_final = mapa[escolha]
-
-                add = st.form_submit_button("Adicionar")
+            add = st.button("Adicionar", key="btn_add_item")
 
             if add:
-                # ✅ usa o código escolhido (se veio da sugestão)
-                codigo = (codigo_final or "").strip()
+                codigo_final = ""
 
-                if not codigo:
-                    st.warning("Digite/bipe um código.")
+                # prioridade: código bipado
+                if (codigo_bipe or "").strip():
+                    codigo_final = (codigo_bipe or "").strip()
+
+                # senão, usa o selecionado no autocomplete
+                elif escolha_label:
+                    try:
+                        codigo_final = (
+                            escolha_label.split("— cód", 1)[1]
+                            .split("|", 1)[0]
+                            .strip()
+                        )
+                    except Exception:
+                        codigo_final = ""
+
+                if not codigo_final:
+                    st.warning("Digite e selecione um produto, ou bipe um código.")
                 else:
-                    prod = buscar_produto_por_codigo(loja_id_ativa, codigo)
+                    prod = buscar_produto_por_codigo(loja_id_ativa, codigo_final)
                     if not prod:
-                        st.error("Produto não encontrado pelo código (nesta loja).")
+                        st.error("Produto não encontrado (nesta loja).")
                     else:
-                        qtd = int(qtd)
-                        if qtd > int(prod.get("quantidade", 0)):
+                        qtd_int = int(qtd)
+                        if qtd_int > int(prod.get("quantidade", 0)):
                             st.error("Quantidade excede o estoque disponível.")
                         else:
                             st.session_state.cart.append(
@@ -1609,11 +1672,20 @@ if pagina == "🧾 Caixa (PDV)":
                                     "produto": str(prod["nome"]),
                                     "preco_unit": float(prod["preco_venda"]),
                                     "preco_custo": float(prod.get("preco_custo", 0.0)),
-                                    "qtd": int(qtd),
-                                    "total_item": float(prod["preco_venda"]) * int(qtd),
+                                    "qtd": int(qtd_int),
+                                    "total_item": float(prod["preco_venda"]) * int(qtd_int),
                                 }
                             )
                             st.success("Item adicionado!")
+
+                            # limpa campos de entrada
+                            try:
+                                st.session_state["caixa_autocomplete"] = None
+                            except Exception:
+                                pass
+                            st.session_state["caixa_codigo_bipe"] = ""
+
+                            st.rerun()
 
         st.subheader("Carrinho (editável)")
 
@@ -1665,7 +1737,13 @@ if pagina == "🧾 Caixa (PDV)":
                     st.session_state.cart = []
                     st.rerun()
             with c2:
-                idx = st.number_input("Remover item (nº)", min_value=1, max_value=len(st.session_state.cart), value=1, step=1)
+                idx = st.number_input(
+                    "Remover item (nº)",
+                    min_value=1,
+                    max_value=len(st.session_state.cart),
+                    value=1,
+                    step=1,
+                )
             with c3:
                 if st.button("Remover"):
                     st.session_state.cart.pop(int(idx) - 1)
@@ -1681,9 +1759,17 @@ if pagina == "🧾 Caixa (PDV)":
         else:
             sid = int(_sess_get(sess, "id", 0) or 0)
 
-            forma_ui = st.selectbox("Forma de pagamento", ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"], index=0)
+            forma_ui = st.selectbox(
+                "Forma de pagamento",
+                ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"],
+                index=0,
+            )
             desconto_txt = st.text_input("Desconto (R$)", value="0")
-            recebido_txt = st.text_input("Recebido (somente dinheiro)", value="0", disabled=(forma_ui != "Dinheiro"))
+            recebido_txt = st.text_input(
+                "Recebido (somente dinheiro)",
+                value="0",
+                disabled=(forma_ui != "Dinheiro"),
+            )
 
             df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
             subtotal = float(df_cart["total_item"].sum()) if (not df_cart.empty and "total_item" in df_cart.columns) else 0.0
@@ -1740,7 +1826,14 @@ if pagina == "🧾 Caixa (PDV)":
                     st.stop()
 
                 numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
-                txt = cupom_txt(st.session_state.cart, numero_venda, forma_ui, float(desconto), float(recebido), float(troco))
+                txt = cupom_txt(
+                    st.session_state.cart,
+                    numero_venda,
+                    forma_ui,
+                    float(desconto),
+                    float(recebido),
+                    float(troco),
+                )
 
                 st.session_state.cupom_txt = txt
                 st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
@@ -1830,7 +1923,8 @@ elif pagina == "📦 Estoque":
         df_show = df.copy()
         df_show["preco_custo"] = df_show["preco_custo"].map(lambda x: f"R$ {brl(x)}")
         df_show["preco_venda"] = df_show["preco_venda"].map(lambda x: f"R$ {brl(x)}")
-        st.dataframe(df_show, width="stretch", hide_index=True)        # =========================
+        st.dataframe(df_show, width="stretch", hide_index=True)
+
 
         # ✅ NOVO: EDITAR PRODUTO EXISTENTE
         # =========================
