@@ -392,7 +392,6 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     conn.execute("ALTER TABLE produtos_new RENAME TO produtos")
     conn.commit()
 
-
 # =========================
 # Banco
 # =========================
@@ -1522,12 +1521,41 @@ if pagina == "🧾 Caixa (PDV)":
             st.info("Abra o caixa na barra lateral para vender.")
         else:
             with st.form("add_item", clear_on_submit=True):
-                codigo = st.text_input("Código", placeholder="Bipe o código / digite e Enter")
-                qtd = st.number_input("Quantidade", min_value=1, step=1, value=1)
+                # ✅ agora aceita digitar "claro" e sugere itens
+                codigo = st.text_input(
+                    "Código",
+                    placeholder="Bipe o código / digite e Enter (ou digite: claro, vivo...)",
+                    key="caixa_codigo"
+                )
+                qtd = st.number_input("Quantidade", min_value=1, step=1, value=1, key="caixa_qtd")
+
+                termo = (st.session_state.get("caixa_codigo") or "").strip()
+                codigo_final = termo  # padrão: usa o que digitou (scanner)
+
+                # ✅ só sugere se tiver pelo menos 2 caracteres
+                sugestoes = buscar_produtos_sugestoes(loja_id_ativa, termo, limit=10) if len(termo) >= 2 else []
+
+                if sugestoes:
+                    st.caption("Sugestões do estoque (selecione):")
+                    mapa = {}
+                    labels = []
+                    for p in sugestoes:
+                        label = f"{p['nome']} — cód {p['codigo']} | Est: {p['quantidade']} | R$ {brl(p['preco_venda'])}"
+                        labels.append(label)
+                        mapa[label] = p["codigo"]
+
+                    escolha = st.selectbox("Opções", labels, key="caixa_sugestao")
+                    usar = st.checkbox("Usar sugestão selecionada", value=True, key="caixa_usar_sugestao")
+
+                    if usar and escolha:
+                        codigo_final = mapa[escolha]
+
                 add = st.form_submit_button("Adicionar")
 
             if add:
-                codigo = (codigo or "").strip()
+                # ✅ usa o código escolhido (se veio da sugestão)
+                codigo = (codigo_final or "").strip()
+
                 if not codigo:
                     st.warning("Digite/bipe um código.")
                 else:
@@ -1763,12 +1791,10 @@ elif pagina == "📦 Estoque":
     if df.empty:
         st.info("Sem produtos cadastrados nesta loja.")
     else:
-        # Mostra tabela formatada pro usuário
         df_show = df.copy()
         df_show["preco_custo"] = df_show["preco_custo"].map(lambda x: f"R$ {brl(x)}")
         df_show["preco_venda"] = df_show["preco_venda"].map(lambda x: f"R$ {brl(x)}")
         st.dataframe(df_show, width="stretch", hide_index=True)
-
         # =========================
         # ✅ NOVO: EDITAR PRODUTO EXISTENTE
         # =========================
