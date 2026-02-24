@@ -1502,6 +1502,42 @@ else:
             st.sidebar.error(str(e))
 
 # =========================
+# ✅ Sugestões de produtos (para buscar por nome no Caixa)
+# Cole este bloco ANTES do bloco "# PÁGINAS"
+# =========================
+def buscar_produtos_sugestoes(loja_id: int, termo: str, limit: int = 10):
+    termo = (termo or "").strip()
+    if not termo:
+        return []
+
+    like = f"%{termo}%"
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT codigo, nome, preco_venda, quantidade
+            FROM produtos
+            WHERE loja_id = ?
+              AND (nome LIKE ? OR codigo LIKE ?)
+            ORDER BY nome ASC
+            LIMIT ?
+            """,
+            (int(loja_id), like, like, int(limit)),
+        )
+        rows = cur.fetchall()
+
+    return [
+        {
+            "codigo": str(r["codigo"]),
+            "nome": str(r["nome"]),
+            "preco_venda": float(r["preco_venda"] or 0.0),
+            "quantidade": int(r["quantidade"] or 0),
+        }
+        for r in rows
+    ]
+
+
+# =========================
 # PÁGINAS
 # =========================
 try:
@@ -1794,8 +1830,8 @@ elif pagina == "📦 Estoque":
         df_show = df.copy()
         df_show["preco_custo"] = df_show["preco_custo"].map(lambda x: f"R$ {brl(x)}")
         df_show["preco_venda"] = df_show["preco_venda"].map(lambda x: f"R$ {brl(x)}")
-        st.dataframe(df_show, width="stretch", hide_index=True)
-        # =========================
+        st.dataframe(df_show, width="stretch", hide_index=True)        # =========================
+
         # ✅ NOVO: EDITAR PRODUTO EXISTENTE
         # =========================
         st.divider()
