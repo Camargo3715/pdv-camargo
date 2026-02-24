@@ -1602,6 +1602,12 @@ if pagina == "🧾 Caixa (PDV)":
         if not sess:
             st.info("Abra o caixa na barra lateral para vender.")
         else:
+            # ✅ token pra resetar os widgets sem mexer no session_state depois de instanciados
+            if "caixa_reset" not in st.session_state:
+                st.session_state.caixa_reset = 0
+
+            reset = int(st.session_state.caixa_reset)
+
             # 🔎 callback do autocomplete (executa enquanto digita)
             def _search_produtos(query: str):
                 q = (query or "").strip()
@@ -1613,18 +1619,18 @@ if pagina == "🧾 Caixa (PDV)":
                     for p in sugestoes
                 ]
 
-            # ✅ AUTOCOMPLETE (fora de st.form) -> funciona enquanto digita
+            # ✅ AUTOCOMPLETE (fora de form) — key muda quando reseta
             escolha_label = st_searchbox(
                 _search_produtos,
-                key="caixa_autocomplete",
+                key=f"caixa_autocomplete_{reset}",
                 placeholder="Comece a digitar (ex: claro, vivo, capinha...)",
             )
 
-            # ✅ campo opcional para leitor de código
+            # ✅ campo opcional para leitor de código — key muda quando reseta
             codigo_bipe = st.text_input(
                 "Código (opcional — leitor)",
                 placeholder="Bipe o código aqui se preferir",
-                key="caixa_codigo_bipe",
+                key=f"caixa_codigo_bipe_{reset}",
             )
 
             qtd = st.number_input(
@@ -1678,13 +1684,8 @@ if pagina == "🧾 Caixa (PDV)":
                             )
                             st.success("Item adicionado!")
 
-                            # limpa campos de entrada
-                            try:
-                                st.session_state["caixa_autocomplete"] = None
-                            except Exception:
-                                pass
-                            st.session_state["caixa_codigo_bipe"] = ""
-
+                            # ✅ força recriação dos widgets (limpa campos)
+                            st.session_state.caixa_reset = reset + 1
                             st.rerun()
 
         st.subheader("Carrinho (editável)")
