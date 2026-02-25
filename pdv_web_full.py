@@ -11,6 +11,8 @@ import secrets
 import hashlib
 import glob
 from typing import Optional
+from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
 
 from datetime import datetime, timedelta, date
 
@@ -1202,11 +1204,15 @@ def registrar_venda_completa_db(
 # Cupom TXT (simples)
 # =========================
 def cupom_txt(itens: list, numero_venda: str, forma_ui: str, desconto: float, recebido: float, troco: float) -> str:
+    tz_br = ZoneInfo("America/Sao_Paulo")
+    agora = datetime.now(tz_br)
+
     linhas = []
     linhas.append("PDV Camargo Celulares")
     linhas.append(f"Venda: {numero_venda}")
-    linhas.append(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    linhas.append(f"Data: {agora.strftime('%d/%m/%Y %H:%M:%S')}")
     linhas.append("-" * 38)
+
     for it in itens:
         nome = str(it.get("produto", ""))[:28]
         qtd = int(it.get("qtd", 0) or 0)
@@ -1214,19 +1220,26 @@ def cupom_txt(itens: list, numero_venda: str, forma_ui: str, desconto: float, re
         tt = float(it.get("total_item", pu * qtd))
         linhas.append(f"{nome}")
         linhas.append(f"  {qtd} x {brl(pu)} = {brl(tt)}")
+
     linhas.append("-" * 38)
+
     subtotal = float(sum(float(i.get("total_item", 0.0) or 0.0) for i in itens))
     total = max(0.0, subtotal - float(desconto or 0.0))
+
     linhas.append(f"Subtotal: R$ {brl(subtotal)}")
     linhas.append(f"Desconto: R$ {brl(desconto)}")
     linhas.append(f"Total:    R$ {brl(total)}")
     linhas.append(f"Pagamento: {forma_ui}")
+
     if (forma_ui or "").strip().lower() == "dinheiro":
         linhas.append(f"Recebido: R$ {brl(recebido)}")
         linhas.append(f"Troco:    R$ {brl(troco)}")
+
     linhas.append("-" * 38)
     linhas.append("OBRIGADO! VOLTE SEMPRE :)")
+
     return "\n".join(linhas)
+
 # =========================
 # Relatórios — MULTI-LOJA
 # =========================
