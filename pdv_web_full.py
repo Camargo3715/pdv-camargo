@@ -397,7 +397,7 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     conn.commit()
 
 # =========================
-# Banco (ATUALIZADO com seed loja_config + helpers)
+# Banco (ATUALIZADO com seed loja_config + helpers + alias get_loja_config)
 # =========================
 
 def conectar():
@@ -469,7 +469,6 @@ def seed_loja_config(conn):
     """
     cur = conn.cursor()
 
-    # lojas sem config
     cur.execute("""
         SELECT l.id, l.nome
         FROM lojas l
@@ -479,7 +478,7 @@ def seed_loja_config(conn):
     faltantes = cur.fetchall()
 
     for row in faltantes:
-        loja_id = row[0]
+        loja_id = int(row[0])
         loja_nome = row[1] or ""
         cfg = _config_padrao(loja_nome)
 
@@ -508,18 +507,17 @@ def seed_loja_config(conn):
 
 def obter_loja_config(loja_id: int) -> dict:
     """
-    Lê config da loja. Se não existir (caso raro), cria fallback na hora.
+    Lê config da loja. Se não existir, cria fallback na hora.
     """
     with conectar() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
-        cur.execute("SELECT * FROM loja_config WHERE loja_id = ?", (loja_id,))
+        cur.execute("SELECT * FROM loja_config WHERE loja_id = ?", (int(loja_id),))
         row = cur.fetchone()
 
         if row is None:
-            # pega nome da loja pra compor padrão
-            cur.execute("SELECT nome FROM lojas WHERE id = ?", (loja_id,))
+            cur.execute("SELECT nome FROM lojas WHERE id = ?", (int(loja_id),))
             loja = cur.fetchone()
             loja_nome = (loja["nome"] if loja else "") or ""
 
@@ -531,7 +529,7 @@ def obter_loja_config(loja_id: int) -> dict:
                     mostrar_cupom_nao_fiscal, atualizado_em
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                loja_id,
+                int(loja_id),
                 cfg["nome_fantasia"],
                 cfg["razao_social"],
                 cfg["cnpj"],
@@ -545,10 +543,16 @@ def obter_loja_config(loja_id: int) -> dict:
             ))
             conn.commit()
 
-            cur.execute("SELECT * FROM loja_config WHERE loja_id = ?", (loja_id,))
+            cur.execute("SELECT * FROM loja_config WHERE loja_id = ?", (int(loja_id),))
             row = cur.fetchone()
 
-        return dict(row)
+        return dict(row) if row else {}
+
+
+# ✅ Alias (mantém compatível com cfg = get_loja_config(...))
+def get_loja_config(loja_id: int) -> dict:
+    return obter_loja_config(loja_id)
+
 
 
 # =========================
