@@ -553,6 +553,68 @@ def obter_loja_config(loja_id: int) -> dict:
 def get_loja_config(loja_id: int) -> dict:
     return obter_loja_config(loja_id)
 
+# =========================
+# Loja Config — salvar (upsert)
+# =========================
+def upsert_loja_config(loja_id: int, dados: dict):
+    """
+    Salva/atualiza dados em loja_config (por loja).
+    Se não existir, cria (via obter_loja_config) e depois atualiza.
+    """
+    loja_id = int(loja_id)
+    dados = dados or {}
+
+    allowed = {
+        "nome_fantasia",
+        "razao_social",
+        "cnpj",
+        "ie",
+        "endereco",
+        "cidade_uf",
+        "telefone",
+        "mensagem",
+        "mostrar_cupom_nao_fiscal",
+    }
+    clean = {k: dados.get(k) for k in allowed if k in dados}
+
+    if "mostrar_cupom_nao_fiscal" in clean:
+        clean["mostrar_cupom_nao_fiscal"] = 1 if int(clean["mostrar_cupom_nao_fiscal"] or 0) == 1 else 0
+
+    atualizado_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # garante registro existente (seed/fallback)
+    _ = obter_loja_config(loja_id)
+
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE loja_config
+               SET nome_fantasia = COALESCE(?, nome_fantasia),
+                   razao_social  = COALESCE(?, razao_social),
+                   cnpj          = COALESCE(?, cnpj),
+                   ie            = COALESCE(?, ie),
+                   endereco      = COALESCE(?, endereco),
+                   cidade_uf     = COALESCE(?, cidade_uf),
+                   telefone      = COALESCE(?, telefone),
+                   mensagem      = COALESCE(?, mensagem),
+                   mostrar_cupom_nao_fiscal = COALESCE(?, mostrar_cupom_nao_fiscal),
+                   atualizado_em = ?
+             WHERE loja_id = ?
+        """, (
+            clean.get("nome_fantasia"),
+            clean.get("razao_social"),
+            clean.get("cnpj"),
+            clean.get("ie"),
+            clean.get("endereco"),
+            clean.get("cidade_uf"),
+            clean.get("telefone"),
+            clean.get("mensagem"),
+            clean.get("mostrar_cupom_nao_fiscal"),
+            atualizado_em,
+            loja_id,
+        ))
+        conn.commit()
+
 
 
 # =========================
