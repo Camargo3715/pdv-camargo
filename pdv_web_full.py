@@ -397,8 +397,9 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     conn.commit()
 
 # =========================
-# Banco
+# Banco (ATUALIZADO com seed loja_config + helpers)
 # =========================
+
 def conectar():
     """
     Conecta no SQLite. Se o caminho atual falhar, cai para /tmp/pdv.db.
@@ -442,11 +443,123 @@ def executar_exec(sql: str, params: tuple = ()):
         cur.execute(sql, params)
         conn.commit()
         return cur.lastrowid
+
+
+# =========================
+# Loja Config (seed + leitura)
+# =========================
+def _config_padrao(loja_nome: str = "") -> dict:
+    return {
+        "nome_fantasia": (loja_nome or "Camargo Celulares"),
+        "razao_social": (loja_nome or "Camargo Celulares"),
+        "cnpj": "",
+        "ie": "ISENTO",
+        "endereco": "",
+        "cidade_uf": "",
+        "telefone": "",
+        "mensagem": "OBRIGADO! VOLTE SEMPRE :)",
+        "mostrar_cupom_nao_fiscal": 1,
+        "atualizado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def seed_loja_config(conn):
+    """
+    ✅ Seed automático: cria registro padrão em loja_config para lojas sem config.
+    """
+    cur = conn.cursor()
+
+    # lojas sem config
+    cur.execute("""
+        SELECT l.id, l.nome
+        FROM lojas l
+        LEFT JOIN loja_config c ON c.loja_id = l.id
+        WHERE c.loja_id IS NULL
+    """)
+    faltantes = cur.fetchall()
+
+    for row in faltantes:
+        loja_id = row[0]
+        loja_nome = row[1] or ""
+        cfg = _config_padrao(loja_nome)
+
+        cur.execute("""
+            INSERT INTO loja_config (
+                loja_id, nome_fantasia, razao_social, cnpj, ie,
+                endereco, cidade_uf, telefone, mensagem,
+                mostrar_cupom_nao_fiscal, atualizado_em
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            loja_id,
+            cfg["nome_fantasia"],
+            cfg["razao_social"],
+            cfg["cnpj"],
+            cfg["ie"],
+            cfg["endereco"],
+            cfg["cidade_uf"],
+            cfg["telefone"],
+            cfg["mensagem"],
+            cfg["mostrar_cupom_nao_fiscal"],
+            cfg["atualizado_em"],
+        ))
+
+    conn.commit()
+
+
+def obter_loja_config(loja_id: int) -> dict:
+    """
+    Lê config da loja. Se não existir (caso raro), cria fallback na hora.
+    """
+    with conectar() as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        cur.execute("SELECT * FROM loja_config WHERE loja_id = ?", (loja_id,))
+        row = cur.fetchone()
+
+        if row is None:
+            # pega nome da loja pra compor padrão
+            cur.execute("SELECT nome FROM lojas WHERE id = ?", (loja_id,))
+            loja = cur.fetchone()
+            loja_nome = (loja["nome"] if loja else "") or ""
+
+            cfg = _config_padrao(loja_nome)
+            cur.execute("""
+                INSERT INTO loja_config (
+                    loja_id, nome_fantasia, razao_social, cnpj, ie,
+                    endereco, cidade_uf, telefone, mensagem,
+                    mostrar_cupom_nao_fiscal, atualizado_em
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                loja_id,
+                cfg["nome_fantasia"],
+                cfg["razao_social"],
+                cfg["cnpj"],
+                cfg["ie"],
+                cfg["endereco"],
+                cfg["cidade_uf"],
+                cfg["telefone"],
+                cfg["mensagem"],
+                cfg["mostrar_cupom_nao_fiscal"],
+                cfg["atualizado_em"],
+            ))
+            conn.commit()
+
+            cur.execute("SELECT * FROM loja_config WHERE loja_id = ?", (loja_id,))
+            row = cur.fetchone()
+
+        return dict(row)
+
+
+# =========================
+# Inicialização do Banco
+# =========================
 def inicializar_banco():
     """
     ✅ Inicializa banco MULTI-LOJA.
-    - Cria tabela lojas + cadastra 3 lojas (se vazio)
+    - Cria tabela lojas + cadastra lojas padrão (se vazio)
     - Migra produtos legado para multi-loja (tudo vira loja_id=1)
+    - Cria loja_config e faz seed automático por loja
     - Auto-backup diário + retenção (se habilitado)
     """
     with conectar() as conn:
@@ -455,12 +568,32 @@ def inicializar_banco():
         # 1) Lojas
         garantir_lojas_padrao(conn)
 
+        # 1.1) Configuração do cupom por loja (Painel do Proprietário)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS loja_config (
+                loja_id INTEGER PRIMARY KEY,
+                nome_fantasia TEXT,
+                razao_social TEXT,
+                cnpj TEXT,
+                ie TEXT,
+                endereco TEXT,
+                cidade_uf TEXT,
+                telefone TEXT,
+                mensagem TEXT,
+                mostrar_cupom_nao_fiscal INTEGER DEFAULT 1,
+                atualizado_em TEXT,
+                FOREIGN KEY (loja_id) REFERENCES lojas(id) ON DELETE CASCADE
+            )
+        """)
+
+        # ✅ SEED automático (antes/independente do resto)
+        seed_loja_config(conn)
+
         # 2) Produtos
         if tabela_existe(conn, "produtos"):
             migrar_produtos_para_multiloja(conn)
         else:
-            cur.execute(
-                """
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS produtos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     loja_id INTEGER NOT NULL,
@@ -472,12 +605,10 @@ def inicializar_banco():
                     UNIQUE(loja_id, codigo),
                     FOREIGN KEY (loja_id) REFERENCES lojas(id)
                 )
-                """
-            )
+            """)
 
         # (LEGADO) vendas
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS vendas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 loja_id INTEGER NOT NULL DEFAULT 1,
@@ -489,12 +620,10 @@ def inicializar_banco():
                 total REAL NOT NULL,
                 FOREIGN KEY (loja_id) REFERENCES lojas(id)
             )
-            """
-        )
+        """)
 
         # Caixa sessões
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS caixa_sessoes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 loja_id INTEGER NOT NULL DEFAULT 1,
@@ -510,12 +639,10 @@ def inicializar_banco():
                 obs_fechamento TEXT,
                 FOREIGN KEY (loja_id) REFERENCES lojas(id)
             )
-            """
-        )
+        """)
 
         # Vendas cabeçalho
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS vendas_cabecalho (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 loja_id INTEGER NOT NULL DEFAULT 1,
@@ -531,12 +658,10 @@ def inicializar_banco():
                 FOREIGN KEY (loja_id) REFERENCES lojas(id),
                 FOREIGN KEY (sessao_id) REFERENCES caixa_sessoes(id)
             )
-            """
-        )
+        """)
 
         # Vendas itens
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS vendas_itens (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 loja_id INTEGER NOT NULL DEFAULT 1,
@@ -550,8 +675,7 @@ def inicializar_banco():
                 FOREIGN KEY (loja_id) REFERENCES lojas(id),
                 FOREIGN KEY (venda_id) REFERENCES vendas_cabecalho(id) ON DELETE CASCADE
             )
-            """
-        )
+        """)
 
         # Migração: adiciona loja_id nas tabelas existentes
         for tabela in ["vendas", "caixa_sessoes", "vendas_cabecalho", "vendas_itens"]:
@@ -822,6 +946,8 @@ def map_forma_pagamento(rotulo_ui: str) -> str:
     if "débito" in r or "debito" in r:
         return "CARTAO_DEBITO"
     return "OUTRO"
+
+
 # =========================
 # Lojas (helpers)
 # =========================
@@ -842,6 +968,7 @@ def get_loja_nome(loja_id) -> str:
         cur.execute("SELECT nome FROM lojas WHERE id = ?", (lid,))
         r = cur.fetchone()
     return str(r["nome"]) if r else f"Loja {lid}"
+
 
 
 # =========================
@@ -1116,6 +1243,7 @@ def fechar_caixa_db(loja_id: int, sessao_id: int, saldo_informado: float, obs: s
 
 # =========================
 # Vendas (registrar venda completa) — MULTI-LOJA
+# (ATUALIZADO: gera cupom por loja_config)
 # =========================
 def registrar_venda_completa_db(
     loja_id: int,
@@ -1129,7 +1257,7 @@ def registrar_venda_completa_db(
     troco: float,
     status: str = "FINALIZADA",
     baixar_estoque: bool = True,
-) -> int:
+) -> tuple[int, str]:
     if not itens:
         raise RuntimeError("Carrinho vazio.")
 
@@ -1193,7 +1321,19 @@ def registrar_venda_completa_db(
                 )
 
             conn.commit()
-            return venda_id
+
+            # ✅ gera cupom por loja_config (agora que a venda existe)
+            cupom = cupom_txt(
+                itens=itens,
+                numero_venda=str(venda_id),
+                forma_ui=str(forma_pagamento or "OUTRO"),
+                desconto=float(desconto or 0.0),
+                recebido=float(recebido or 0.0),
+                troco=float(troco or 0.0),
+                loja_id=int(loja_id),
+            )
+
+            return venda_id, cupom
 
         except Exception:
             conn.rollback()
@@ -1201,18 +1341,60 @@ def registrar_venda_completa_db(
 
 
 # =========================
-# Cupom TXT (simples)
+# Cupom TXT (por loja)
 # =========================
-def cupom_txt(itens: list, numero_venda: str, forma_ui: str, desconto: float, recebido: float, troco: float) -> str:
+def cupom_txt(
+    itens: list,
+    numero_venda: str,
+    forma_ui: str,
+    desconto: float,
+    recebido: float,
+    troco: float,
+    loja_id: int
+) -> str:
     tz_br = ZoneInfo("America/Sao_Paulo")
     agora = datetime.now(tz_br)
 
+    # 🔹 busca config da loja
+    cfg = obter_loja_config(loja_id)
+
+    nome_fantasia = (cfg.get("nome_fantasia") or "Camargo Celulares").strip()
+    razao_social  = (cfg.get("razao_social") or "").strip()
+    cnpj          = (cfg.get("cnpj") or "").strip()
+    ie            = (cfg.get("ie") or "").strip()
+    endereco      = (cfg.get("endereco") or "").strip()
+    cidade_uf     = (cfg.get("cidade_uf") or "").strip()
+    telefone      = (cfg.get("telefone") or "").strip()
+    mensagem      = (cfg.get("mensagem") or "OBRIGADO! VOLTE SEMPRE :)").strip()
+    mostrar_nnf   = int(cfg.get("mostrar_cupom_nao_fiscal") or 0) == 1
+
     linhas = []
-    linhas.append("PDV Camargo Celulares")
+
+    # ===== Cabeçalho =====
+    linhas.append(nome_fantasia.upper())
+    if razao_social and razao_social.upper() != nome_fantasia.upper():
+        linhas.append(razao_social)
+    if cnpj:
+        linhas.append(f"CNPJ: {cnpj}")
+    if ie:
+        linhas.append(f"IE: {ie}")
+    if endereco:
+        linhas.append(endereco)
+    if cidade_uf:
+        linhas.append(cidade_uf)
+    if telefone:
+        linhas.append(f"Tel: {telefone}")
+
+    linhas.append("-" * 38)
+
+    if mostrar_nnf:
+        linhas.append("CUPOM NAO FISCAL")
+
     linhas.append(f"Venda: {numero_venda}")
     linhas.append(f"Data: {agora.strftime('%d/%m/%Y %H:%M:%S')}")
     linhas.append("-" * 38)
 
+    # ===== Itens =====
     for it in itens:
         nome = str(it.get("produto", ""))[:28]
         qtd = int(it.get("qtd", 0) or 0)
@@ -1223,6 +1405,7 @@ def cupom_txt(itens: list, numero_venda: str, forma_ui: str, desconto: float, re
 
     linhas.append("-" * 38)
 
+    # ===== Totais =====
     subtotal = float(sum(float(i.get("total_item", 0.0) or 0.0) for i in itens))
     total = max(0.0, subtotal - float(desconto or 0.0))
 
@@ -1236,7 +1419,7 @@ def cupom_txt(itens: list, numero_venda: str, forma_ui: str, desconto: float, re
         linhas.append(f"Troco:    R$ {brl(troco)}")
 
     linhas.append("-" * 38)
-    linhas.append("OBRIGADO! VOLTE SEMPRE :)")
+    linhas.append(mensagem)
 
     return "\n".join(linhas)
 
@@ -1417,18 +1600,40 @@ if st.session_state.loja_id_ativa is None:
 
 loja_id_ativa = _to_int(st.session_state.loja_id_ativa, 1)
 
+
+
 # =========================
 # Navegação (pagina definida ANTES de usar)
 # =========================
-paginas = ["🧾 Caixa (PDV)", "📦 Estoque", "📈 Histórico", "📅 Relatórios"]
+
+paginas = [
+    "🧾 Caixa (PDV)",
+    "📦 Estoque",
+    "📈 Histórico",
+    "📅 Relatórios",
+]
+
+# ✅ Painel do Proprietário (Admin e Dono)
+if tipo in ("admin", "dono"):
+    paginas.append("🏪 Painel do Proprietário")
+
+# ✅ Páginas exclusivas do Admin
 if tipo == "admin":
     paginas.append("👤 Usuários (Admin)")
     paginas.append("🧨 Zerar Loja (Admin)")
 
+# Blindagem contra NameError / página inválida
 if st.session_state.pagina not in paginas:
     st.session_state.pagina = "🧾 Caixa (PDV)"
 
-pagina = st.sidebar.radio("Navegação", paginas, index=paginas.index(st.session_state.pagina), key="pagina")
+pagina = st.sidebar.radio(
+    "Navegação",
+    paginas,
+    index=paginas.index(st.session_state.pagina),
+    key="pagina"
+)
+
+
 
 # =========================
 # Sidebar — Caixa (sempre visível, mas só funciona com loja_id_ativa válido)
@@ -1516,6 +1721,8 @@ else:
         except Exception as e:
             st.sidebar.error(str(e))
 
+
+
 # =========================
 # ✅ Sugestões de produtos (para buscar por nome no Caixa)
 # Cole este bloco ANTES do bloco "# PÁGINAS"
@@ -1552,6 +1759,7 @@ def buscar_produtos_sugestoes(loja_id: int, termo: str, limit: int = 10):
     ]
 
 
+
 # =========================
 # PÁGINAS
 # =========================
@@ -1559,6 +1767,8 @@ try:
     sess = get_sessao_aberta(loja_id_ativa)
 except Exception:
     sess = None
+
+
 
 
 # =========================
@@ -1822,7 +2032,8 @@ if pagina == "🧾 Caixa (PDV)":
                 forma_db = map_forma_pagamento(forma_ui)
 
                 try:
-                    venda_id = registrar_venda_completa_db(
+                    # ✅ agora retorna (venda_id, cupom)
+                    venda_id, txt = registrar_venda_completa_db(
                         loja_id=loja_id_ativa,
                         sessao_id=int(sid),
                         itens=st.session_state.cart,
@@ -1840,18 +2051,12 @@ if pagina == "🧾 Caixa (PDV)":
                     st.stop()
 
                 numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
-                txt = cupom_txt(
-                    st.session_state.cart,
-                    numero_venda,
-                    forma_ui,
-                    float(desconto),
-                    float(recebido),
-                    float(troco),
-                )
 
+                # ✅ cupom já veio pronto (por loja_config)
                 st.session_state.cupom_txt = txt
                 st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
                 st.session_state.cupom_id = venda_id
+
                 st.session_state.cart = []
                 st.rerun()
 
@@ -1938,6 +2143,7 @@ elif pagina == "📦 Estoque":
         df_show["preco_custo"] = df_show["preco_custo"].map(lambda x: f"R$ {brl(x)}")
         df_show["preco_venda"] = df_show["preco_venda"].map(lambda x: f"R$ {brl(x)}")
         st.dataframe(df_show, width="stretch", hide_index=True)
+
 
 
         # ✅ NOVO: EDITAR PRODUTO EXISTENTE
@@ -2141,4 +2347,61 @@ elif pagina == "🧨 Zerar Loja (Admin)":
 
         st.success("✅ Loja zerada com sucesso!")
         st.json(res)
+        st.rerun()
+
+# Página: Zerar Loja (Admin)
+elif pagina == "🧨 Zerar Loja (Admin)":
+    ...
+    st.rerun()
+
+
+# =========================
+# Página: Painel do Proprietário
+# =========================
+elif pagina == "🏪 Painel do Proprietário":
+
+    st.subheader(f"🏪 Painel do Proprietário — {get_loja_nome(loja_id_ativa)}")
+    st.caption("Configura os dados que aparecem no cupom desta loja.")
+
+    if tipo not in ("admin", "dono"):
+        st.error("Acesso negado.")
+        st.stop()
+
+    cfg = get_loja_config(loja_id_ativa) or {}
+
+    def _v(k, d=""):
+        return cfg.get(k) if cfg.get(k) is not None else d
+
+    with st.form("form_loja_config"):
+
+        nome_fantasia = st.text_input("Nome Fantasia", value=_v("nome_fantasia", get_loja_nome(loja_id_ativa)))
+        razao_social  = st.text_input("Razão Social", value=_v("razao_social", ""))
+        cnpj          = st.text_input("CNPJ", value=_v("cnpj", ""))
+        ie            = st.text_input("IE", value=_v("ie", "ISENTO"))
+
+        telefone = st.text_input("Telefone", value=_v("telefone", ""))
+        endereco = st.text_input("Endereço", value=_v("endereco", ""))
+        cidade_uf = st.text_input("Cidade/UF", value=_v("cidade_uf", ""))
+
+        mensagem = st.text_area(
+            "Mensagem no rodapé do cupom",
+            value=_v("mensagem", "OBRIGADO! VOLTE SEMPRE :)"),
+            height=120
+        )
+
+        salvar = st.form_submit_button("💾 Salvar")
+
+    if salvar:
+        upsert_loja_config(loja_id_ativa, {
+            "nome_fantasia": nome_fantasia,
+            "razao_social": razao_social,
+            "cnpj": cnpj,
+            "ie": ie,
+            "telefone": telefone,
+            "endereco": endereco,
+            "cidade_uf": cidade_uf,
+            "mensagem": mensagem,
+        })
+
+        st.success("Configurações salvas com sucesso!")
         st.rerun()
