@@ -2077,6 +2077,11 @@ if pagina == "🧾 Caixa (PDV)":
             if forma_ui == "Dinheiro":
                 st.write(f"Troco: **R$ {brl(troco)}**")
 
+            # ✅ estado de confirmação (uma vez só)
+            if "confirmar_venda" not in st.session_state:
+                st.session_state.confirmar_venda = False
+
+            # 1) Primeiro clique: pedir confirmação (sem gravar no banco)
             if st.button("✅ FINALIZAR"):
                 if not st.session_state.cart:
                     st.error("Carrinho vazio.")
@@ -2095,36 +2100,66 @@ if pagina == "🧾 Caixa (PDV)":
                     st.error("Valor recebido menor que o total com desconto.")
                     st.stop()
 
-                forma_db = map_forma_pagamento(forma_ui)
-
-                try:
-                    # ✅ agora retorna (venda_id, cupom)
-                    venda_id, txt = registrar_venda_completa_db(
-                        loja_id=loja_id_ativa,
-                        sessao_id=int(sid),
-                        itens=st.session_state.cart,
-                        forma_pagamento=forma_db,
-                        subtotal=subtotal,
-                        desconto=float(desconto),
-                        total=total_liq,
-                        recebido=float(recebido),
-                        troco=float(troco),
-                        status="FINALIZADA",
-                        baixar_estoque=True,
-                    )
-                except Exception as e:
-                    st.error(f"Erro ao registrar venda: {e}")
-                    st.stop()
-
-                numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
-
-                # ✅ cupom já veio pronto (por loja_config)
-                st.session_state.cupom_txt = txt
-                st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
-                st.session_state.cupom_id = venda_id
-
-                st.session_state.cart = []
+                # ✅ entrou em modo confirmação
+                st.session_state.confirmar_venda = True
                 st.rerun()
+
+            # 2) Modo confirmação: mostra resumo + CONFIRMAR/CANCELAR
+            if st.session_state.confirmar_venda:
+                st.warning("⚠️ Confirme os dados antes de finalizar (gravar no sistema)")
+
+                st.markdown("### Revisão da venda")
+                st.write(f"Loja: **{get_loja_nome(loja_id_ativa)}**")
+                st.write(f"Itens: **{len(st.session_state.cart)}**")
+                st.write(f"Forma de pagamento: **{forma_ui}**")
+                st.write(f"Subtotal: **R$ {brl(subtotal)}**")
+                st.write(f"Desconto: **R$ {brl(desconto)}**")
+                st.write(f"Total a pagar: **R$ {brl(total_liq)}**")
+                if forma_ui == "Dinheiro":
+                    st.write(f"Recebido: **R$ {brl(recebido)}**")
+                    st.write(f"Troco: **R$ {brl(troco)}**")
+
+                b1, b2 = st.columns(2)
+
+                with b1:
+                    if st.button("✅ CONFIRMAR VENDA", key="btn_confirmar_venda"):
+                        forma_db = map_forma_pagamento(forma_ui)
+
+                        try:
+                            # ✅ agora retorna (venda_id, cupom)
+                            venda_id, txt = registrar_venda_completa_db(
+                                loja_id=loja_id_ativa,
+                                sessao_id=int(sid),
+                                itens=st.session_state.cart,
+                                forma_pagamento=forma_db,
+                                subtotal=subtotal,
+                                desconto=float(desconto),
+                                total=total_liq,
+                                recebido=float(recebido),
+                                troco=float(troco),
+                                status="FINALIZADA",
+                                baixar_estoque=True,
+                            )
+                        except Exception as e:
+                            st.error(f"Erro ao registrar venda: {e}")
+                            st.stop()
+
+                        numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
+
+                        # ✅ cupom já veio pronto (por loja_config)
+                        st.session_state.cupom_txt = txt
+                        st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
+                        st.session_state.cupom_id = venda_id
+
+                        st.session_state.cart = []
+                        st.session_state.confirmar_venda = False
+                        st.rerun()
+
+                with b2:
+                    if st.button("❌ CANCELAR", key="btn_cancelar_venda"):
+                        st.session_state.confirmar_venda = False
+                        st.info("Venda cancelada. Você pode ajustar e finalizar novamente.")
+                        st.rerun()
 
             if st.session_state.cupom_txt:
                 st.divider()
