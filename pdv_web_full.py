@@ -2255,22 +2255,55 @@ elif pagina == "📦 Estoque":
         df_edit = df.copy()
 
         filtro = st.text_input("Buscar para editar (código ou nome)", value="", key="edit_filtro")
-        if filtro.strip():
-            f = filtro.strip().lower()
-            df_edit = df_edit[
-                df_edit["codigo"].astype(str).str.lower().str.contains(f) |
-                df_edit["nome"].astype(str).str.lower().str.contains(f)
-            ]
+        f = (filtro or "").strip().lower()
+
+        # ✅ reset do selectbox quando o filtro muda (evita “puxar outro produto”)
+        if "edit_reset" not in st.session_state:
+            st.session_state.edit_reset = 0
+        if "edit_last_filter" not in st.session_state:
+            st.session_state.edit_last_filter = ""
+
+        if f != st.session_state.edit_last_filter:
+            st.session_state.edit_last_filter = f
+            st.session_state.edit_reset += 1
+
+        if f:
+            cod_series = df_edit["codigo"].astype(str).str.lower()
+            nome_series = df_edit["nome"].astype(str).str.lower()
+
+            # ✅ Se parece código (só dígitos), tenta match exato primeiro
+            if f.isdigit():
+                exato = df_edit[cod_series == f]
+                if not exato.empty:
+                    df_edit = exato
+                else:
+                    # fallback: começa com (melhor que contains)
+                    df_edit = df_edit[
+                        cod_series.str.startswith(f) |
+                        nome_series.str.contains(f, na=False)
+                    ]
+            else:
+                # texto normal: busca no nome e no código (contains)
+                df_edit = df_edit[
+                    cod_series.str.contains(f, na=False) |
+                    nome_series.str.contains(f, na=False)
+                ]
 
         if df_edit.empty:
             st.info("Nenhum produto encontrado com esse filtro.")
         else:
-            # opções amigáveis
+            df_edit = df_edit.copy()  # evita SettingWithCopyWarning
+
             df_edit["__opt__"] = df_edit.apply(
                 lambda r: f"{r['codigo']} — {r['nome']} (Qtd: {int(r['quantidade'])})",
                 axis=1
             )
-            opt = st.selectbox("Selecione o produto", df_edit["__opt__"].tolist(), key="edit_select")
+
+            opt = st.selectbox(
+                "Selecione o produto",
+                df_edit["__opt__"].tolist(),
+                key=f"edit_select_{st.session_state.edit_reset}",
+            )
 
             row = df_edit[df_edit["__opt__"] == opt].iloc[0]
 
@@ -2315,8 +2348,6 @@ elif pagina == "📦 Estoque":
                     elif not nome_novo.strip():
                         st.warning("Nome não pode ficar vazio.")
                     else:
-                        # Reaproveita seu upsert (atualiza o produto do mesmo código)
-                        # ⚠️ Se você mudar o código aqui, dependendo do seu upsert, pode criar outro registro.
                         upsert_produto(
                             loja_id_ativa,
                             codigo_novo.strip(),
@@ -2328,6 +2359,8 @@ elif pagina == "📦 Estoque":
                         st.success("Produto atualizado ✅")
                         st.rerun()
                 except Exception as e:
+                    st.error(str(e))
+
                     st.error(str(e))# Página: Histórico
 elif pagina == "📈 Histórico":
     st.subheader(f"📈 Histórico de Vendas (itens) — {get_loja_nome(loja_id_ativa)}")
