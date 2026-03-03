@@ -1908,29 +1908,30 @@ if pagina == "🧾 Caixa (PDV)":
                     for p in sugestoes
                 ]
 
-            # ✅ AUTOCOMPLETE (fora de form) — key muda quando reseta
+            # ✅ AUTOCOMPLETE (fora do form)
             escolha_label = st_searchbox(
                 _search_produtos,
                 key=f"caixa_autocomplete_{reset}",
                 placeholder="Comece a digitar (ex: claro, vivo, capinha...)",
             )
 
-            # ✅ campo opcional para leitor de código — key muda quando reseta
-            codigo_bipe = st.text_input(
-                "Código (opcional — leitor)",
-                placeholder="Bipe o código aqui se preferir",
-                key=f"caixa_codigo_bipe_{reset}",
-            )
+            # ✅ FORM: Enter no código vai disparar o submit
+            with st.form(key=f"form_add_item_{reset}", clear_on_submit=False):
+                codigo_bipe = st.text_input(
+                    "Código (opcional — leitor)",
+                    placeholder="Bipe o código aqui e aperte Enter",
+                    key=f"caixa_codigo_bipe_{reset}",
+                )
 
-            qtd = st.number_input(
-                "Quantidade",
-                min_value=1,
-                step=1,
-                value=1,
-                key="caixa_qtd",
-            )
+                qtd = st.number_input(
+                    "Quantidade",
+                    min_value=1,
+                    step=1,
+                    value=1,
+                    key=f"caixa_qtd_{reset}",
+                )
 
-            add = st.button("Adicionar", key="btn_add_item")
+                add = st.form_submit_button("Adicionar")
 
             if add:
                 codigo_final = ""
