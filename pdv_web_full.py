@@ -743,6 +743,22 @@ def inicializar_banco():
             )
         """)
 
+        # Vendas pagamentos (novo: suporta pagamento misto)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vendas_pagamentos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                loja_id INTEGER NOT NULL DEFAULT 1,
+                venda_id INTEGER NOT NULL,
+                sessao_id INTEGER,
+                forma_pagamento TEXT NOT NULL,
+                valor REAL NOT NULL DEFAULT 0,
+                criado_em TEXT,
+                FOREIGN KEY (loja_id) REFERENCES lojas(id),
+                FOREIGN KEY (venda_id) REFERENCES vendas_cabecalho(id) ON DELETE CASCADE,
+                FOREIGN KEY (sessao_id) REFERENCES caixa_sessoes(id)
+            )
+        """)
+
         # Migração: adiciona loja_id nas tabelas existentes
         for tabela in ["vendas", "caixa_sessoes", "vendas_cabecalho", "vendas_itens"]:
             if tabela_existe(conn, tabela) and not coluna_existe(conn, tabela, "loja_id"):
@@ -755,6 +771,8 @@ def inicializar_banco():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_cabecalho_sessao ON vendas_cabecalho(sessao_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_itens_venda ON vendas_itens(venda_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_caixa_loja_status ON caixa_sessoes(loja_id, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_pagamentos_loja_sessao ON vendas_pagamentos(loja_id, sessao_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_pagamentos_venda ON vendas_pagamentos(venda_id)")
 
         conn.commit()
 
@@ -1003,16 +1021,20 @@ def brl(v: float) -> str:
 
 def map_forma_pagamento(rotulo_ui: str) -> str:
     r = (rotulo_ui or "").strip().lower()
-    if r == "pix":
-        return "PIX"
-    if r == "dinheiro":
-        return "DINHEIRO"
-    if "crédito" in r or "credito" in r:
-        return "CARTAO_CREDITO"
-    if "débito" in r or "debito" in r:
-        return "CARTAO_DEBITO"
-    return "OUTRO"
 
+    if r in ["pix"]:
+        return "PIX"
+
+    if r in ["dinheiro", "espécie", "especie"]:
+        return "DINHEIRO"
+
+    if r in ["cartão de crédito", "cartao de credito", "crédito", "credito", "cartão crédito", "cartao credito"]:
+        return "CARTAO_CREDITO"
+
+    if r in ["cartão de débito", "cartao de debito", "débito", "debito", "cartão débito", "cartao debito"]:
+        return "CARTAO_DEBITO"
+
+    return "OUTRO"
 
 # =========================
 # Lojas (helpers)
@@ -1177,7 +1199,6 @@ def listar_vendas_itens_df(loja_id: int, filtro_produto: str = ""):
         )
     return df
 
-
 # =========================
 # Caixa (Abertura/Fechamento) — MULTI-LOJA
 # =========================
@@ -1239,9 +1260,25 @@ def totais_sessao(loja_id: int, sessao_id: int):
             """,
             (int(loja_id), int(sessao_id)),
         )
-        total_vendas = float((cur.fetchone()["total"] or 0.0))
+        total_vendas = float(cur.fetchone()["total"] or 0.0)
 
-        saldo_final_sistema = saldo_inicial + total_vendas
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(vp.valor), 0) AS total_dinheiro
+            FROM vendas_pagamentos vp
+            JOIN vendas_cabecalho vc
+              ON vc.id = vp.venda_id
+             AND vc.loja_id = vp.loja_id
+            WHERE vp.loja_id = ?
+              AND vp.sessao_id = ?
+              AND vc.status = 'FINALIZADA'
+              AND UPPER(vp.forma_pagamento) = 'DINHEIRO'
+            """,
+            (int(loja_id), int(sessao_id)),
+        )
+        total_dinheiro = float(cur.fetchone()["total_dinheiro"] or 0.0)
+
+        saldo_final_sistema = saldo_inicial + total_dinheiro
         return saldo_inicial, total_vendas, saldo_final_sistema, aberto_em
 
 
@@ -1250,11 +1287,16 @@ def relatorio_pagamentos_sessao(loja_id: int, sessao_id: int):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT forma_pagamento, COALESCE(SUM(total), 0) AS total
-            FROM vendas_cabecalho
-            WHERE loja_id = ? AND sessao_id = ? AND status='FINALIZADA'
-            GROUP BY forma_pagamento
-            ORDER BY forma_pagamento
+            SELECT vp.forma_pagamento, COALESCE(SUM(vp.valor), 0) AS total
+            FROM vendas_pagamentos vp
+            JOIN vendas_cabecalho vc
+              ON vc.id = vp.venda_id
+             AND vc.loja_id = vp.loja_id
+            WHERE vp.loja_id = ?
+              AND vp.sessao_id = ?
+              AND vc.status = 'FINALIZADA'
+            GROUP BY vp.forma_pagamento
+            ORDER BY vp.forma_pagamento
             """,
             (int(loja_id), int(sessao_id)),
         )
@@ -1315,7 +1357,7 @@ def registrar_venda_completa_db(
     loja_id: int,
     sessao_id: int,
     itens: list,
-    forma_pagamento: str,
+    pagamentos: list,
     subtotal: float,
     desconto: float,
     total: float,
@@ -1324,11 +1366,27 @@ def registrar_venda_completa_db(
     status: str = "FINALIZADA",
     baixar_estoque: bool = True,
 ) -> tuple[int, str]:
+
     if not itens:
         raise RuntimeError("Carrinho vazio.")
 
+    if not pagamentos:
+        raise RuntimeError("Informe ao menos uma forma de pagamento.")
+
+    total_pagamentos = sum(float(p.get("valor", 0)) for p in pagamentos)
+
+    if round(total_pagamentos, 2) < round(total, 2):
+        raise RuntimeError("Valor pago é menor que o total da venda.")
+
+    # define forma resumo
+    if len(pagamentos) == 1:
+        forma_resumo = str(pagamentos[0].get("forma_pagamento", "OUTRO"))
+    else:
+        forma_resumo = "MISTO"
+
     with conectar() as conn:
         cur = conn.cursor()
+
         try:
             cur.execute("BEGIN IMMEDIATE")
 
@@ -1345,26 +1403,30 @@ def registrar_venda_completa_db(
                     float(subtotal or 0.0),
                     float(desconto or 0.0),
                     float(total or 0.0),
-                    str(forma_pagamento or "OUTRO"),
+                    forma_resumo,
                     float(recebido or 0.0),
                     float(troco or 0.0),
                     str(status or "FINALIZADA"),
                 ),
             )
+
             venda_id = int(cur.lastrowid)
 
+            # =========================
+            # Itens da venda
+            # =========================
             for it in itens:
+
                 codigo = str(it.get("codigo", "")).strip()
                 produto = str(it.get("produto", "")).strip()
-                preco_unit = float(it.get("preco_unit", 0.0) or 0.0)
-                preco_custo = float(it.get("preco_custo", 0.0) or 0.0)
-                qtd = int(it.get("qtd", 0) or 0)
-                total_item = float(it.get("total_item", 0.0) or (preco_unit * qtd))
+                preco_unit = float(it.get("preco_unit", 0))
+                preco_custo = float(it.get("preco_custo", 0))
+                qtd = int(it.get("qtd", 0))
+                total_item = float(it.get("total_item", preco_unit * qtd))
 
                 if qtd <= 0:
                     raise RuntimeError("Quantidade inválida no carrinho.")
 
-                # baixa estoque dentro da mesma transação (garante consistência)
                 if baixar_estoque:
                     cur.execute(
                         """
@@ -1374,8 +1436,9 @@ def registrar_venda_completa_db(
                         """,
                         (qtd, int(loja_id), codigo, qtd),
                     )
+
                     if cur.rowcount == 0:
-                        raise RuntimeError(f"Estoque insuficiente para o item: {produto} ({codigo})")
+                        raise RuntimeError(f"Estoque insuficiente para: {produto}")
 
                 cur.execute(
                     """
@@ -1383,16 +1446,51 @@ def registrar_venda_completa_db(
                     (loja_id, venda_id, codigo, produto, preco_unit, preco_custo, qtd, total_item)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (int(loja_id), venda_id, codigo, produto, preco_unit, preco_custo, qtd, total_item),
+                    (
+                        int(loja_id),
+                        venda_id,
+                        codigo,
+                        produto,
+                        preco_unit,
+                        preco_custo,
+                        qtd,
+                        total_item,
+                    ),
+                )
+
+            # =========================
+            # Pagamentos da venda
+            # =========================
+            for p in pagamentos:
+
+                forma = str(p.get("forma_pagamento", "OUTRO")).upper()
+                valor = float(p.get("valor", 0))
+
+                cur.execute(
+                    """
+                    INSERT INTO vendas_pagamentos
+                    (loja_id, venda_id, sessao_id, forma_pagamento, valor, criado_em)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(loja_id),
+                        venda_id,
+                        int(sessao_id),
+                        forma,
+                        valor,
+                        agora_iso(),
+                    ),
                 )
 
             conn.commit()
 
-            # ✅ gera cupom por loja_config (agora que a venda existe)
+            # =========================
+            # Cupom
+            # =========================
             cupom = cupom_txt(
                 itens=itens,
                 numero_venda=str(venda_id),
-                forma_ui=str(forma_pagamento or "OUTRO"),
+                forma_ui=forma_resumo,
                 desconto=float(desconto or 0.0),
                 recebido=float(recebido or 0.0),
                 troco=float(troco or 0.0),
@@ -1404,7 +1502,6 @@ def registrar_venda_completa_db(
         except Exception:
             conn.rollback()
             raise
-
 
 # =========================
 # Cupom TXT (por loja)
@@ -2050,17 +2147,7 @@ if pagina == "🧾 Caixa (PDV)":
         else:
             sid = int(_sess_get(sess, "id", 0) or 0)
 
-            forma_ui = st.selectbox(
-                "Forma de pagamento",
-                ["Pix", "Dinheiro", "Cartão Crédito", "Cartão Débito"],
-                index=0,
-            )
             desconto_txt = st.text_input("Desconto (R$)", value="0")
-            recebido_txt = st.text_input(
-                "Recebido (somente dinheiro)",
-                value="0",
-                disabled=(forma_ui != "Dinheiro"),
-            )
 
             df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
             subtotal = float(df_cart["total_item"].sum()) if (not df_cart.empty and "total_item" in df_cart.columns) else 0.0
@@ -2069,13 +2156,49 @@ if pagina == "🧾 Caixa (PDV)":
             desconto = max(0.0, min(desconto, subtotal))
             total_liq = max(0.0, subtotal - float(desconto))
 
-            recebido = to_float(recebido_txt) if forma_ui == "Dinheiro" else 0.0
-            troco = max(0.0, recebido - total_liq) if forma_ui == "Dinheiro" else 0.0
+            st.markdown("### Pagamentos")
+            dinheiro_txt = st.text_input("Dinheiro (R$)", value="0")
+            pix_txt = st.text_input("PIX (R$)", value="0")
+            credito_txt = st.text_input("Cartão Crédito (R$)", value="0")
+            debito_txt = st.text_input("Cartão Débito (R$)", value="0")
+            recebido_dinheiro_txt = st.text_input("Recebido em dinheiro (para troco)", value="0")
+
+            valor_dinheiro = max(0.0, to_float(dinheiro_txt))
+            valor_pix = max(0.0, to_float(pix_txt))
+            valor_credito = max(0.0, to_float(credito_txt))
+            valor_debito = max(0.0, to_float(debito_txt))
+            recebido_dinheiro = max(0.0, to_float(recebido_dinheiro_txt))
+
+            pagamentos = []
+            if valor_dinheiro > 0:
+                pagamentos.append({"forma_pagamento": "DINHEIRO", "valor": valor_dinheiro})
+            if valor_pix > 0:
+                pagamentos.append({"forma_pagamento": "PIX", "valor": valor_pix})
+            if valor_credito > 0:
+                pagamentos.append({"forma_pagamento": "CARTAO_CREDITO", "valor": valor_credito})
+            if valor_debito > 0:
+                pagamentos.append({"forma_pagamento": "CARTAO_DEBITO", "valor": valor_debito})
+
+            total_pago = valor_dinheiro + valor_pix + valor_credito + valor_debito
+            falta = max(0.0, total_liq - total_pago)
+
+            if valor_dinheiro > 0:
+                base_troco = recebido_dinheiro if recebido_dinheiro > 0 else valor_dinheiro
+                troco = max(0.0, base_troco - valor_dinheiro)
+                recebido = base_troco + valor_pix + valor_credito + valor_debito
+            else:
+                troco = 0.0
+                recebido = total_pago
 
             st.write(f"Total: **R$ {brl(subtotal)}**")
             st.write(f"Desconto: **R$ {brl(desconto)}**")
             st.write(f"Total a pagar: **R$ {brl(total_liq)}**")
-            if forma_ui == "Dinheiro":
+            st.write(f"Total informado nos pagamentos: **R$ {brl(total_pago)}**")
+            if falta > 0:
+                st.error(f"Falta pagar: R$ {brl(falta)}")
+            else:
+                st.success("Pagamento completo.")
+            if valor_dinheiro > 0:
                 st.write(f"Troco: **R$ {brl(troco)}**")
 
             # ✅ estado de confirmação (uma vez só)
@@ -2097,8 +2220,16 @@ if pagina == "🧾 Caixa (PDV)":
                         st.error(f"Estoque insuficiente para {it['produto']}.")
                         st.stop()
 
-                if forma_ui == "Dinheiro" and recebido < total_liq:
-                    st.error("Valor recebido menor que o total com desconto.")
+                if not pagamentos:
+                    st.error("Informe ao menos uma forma de pagamento.")
+                    st.stop()
+
+                if total_pago < total_liq:
+                    st.error("O total dos pagamentos está menor que o total da venda.")
+                    st.stop()
+
+                if valor_dinheiro > 0 and recebido_dinheiro < valor_dinheiro:
+                    st.error("O valor recebido em dinheiro não pode ser menor que o valor pago em dinheiro.")
                     st.stop()
 
                 # ✅ entrou em modo confirmação
@@ -2112,27 +2243,30 @@ if pagina == "🧾 Caixa (PDV)":
                 st.markdown("### Revisão da venda")
                 st.write(f"Loja: **{get_loja_nome(loja_id_ativa)}**")
                 st.write(f"Itens: **{len(st.session_state.cart)}**")
-                st.write(f"Forma de pagamento: **{forma_ui}**")
                 st.write(f"Subtotal: **R$ {brl(subtotal)}**")
                 st.write(f"Desconto: **R$ {brl(desconto)}**")
                 st.write(f"Total a pagar: **R$ {brl(total_liq)}**")
-                if forma_ui == "Dinheiro":
-                    st.write(f"Recebido: **R$ {brl(recebido)}**")
+
+                if pagamentos:
+                    st.write("**Pagamentos:**")
+                    for p in pagamentos:
+                        st.write(f"- {p['forma_pagamento']}: R$ {brl(p['valor'])}")
+
+                st.write(f"Total informado: **R$ {brl(total_pago)}**")
+                if valor_dinheiro > 0:
+                    st.write(f"Recebido em dinheiro: **R$ {brl(recebido_dinheiro)}**")
                     st.write(f"Troco: **R$ {brl(troco)}**")
 
                 b1, b2 = st.columns(2)
 
                 with b1:
                     if st.button("✅ CONFIRMAR VENDA", key="btn_confirmar_venda"):
-                        forma_db = map_forma_pagamento(forma_ui)
-
                         try:
-                            # ✅ agora retorna (venda_id, cupom)
                             venda_id, txt = registrar_venda_completa_db(
                                 loja_id=loja_id_ativa,
                                 sessao_id=int(sid),
                                 itens=st.session_state.cart,
-                                forma_pagamento=forma_db,
+                                pagamentos=pagamentos,
                                 subtotal=subtotal,
                                 desconto=float(desconto),
                                 total=total_liq,
@@ -2147,7 +2281,6 @@ if pagina == "🧾 Caixa (PDV)":
 
                         numero_venda = f"{datetime.now().strftime('%Y%m%d')}-{int(venda_id):06d}"
 
-                        # ✅ cupom já veio pronto (por loja_config)
                         st.session_state.cupom_txt = txt
                         st.session_state.cupom_nome = f"cupom_{numero_venda}.txt"
                         st.session_state.cupom_id = venda_id
