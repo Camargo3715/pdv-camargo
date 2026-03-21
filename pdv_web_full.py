@@ -14,11 +14,10 @@ from typing import Optional
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 
-from datetime import datetime, timedelta, date
-
 import streamlit as st
 import pandas as pd
 from streamlit_searchbox import st_searchbox
+
 
 APP_TITLE = "PDV Camargo Celulares — Web"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -278,7 +277,7 @@ def zerar_loja_db(loja_id: int) -> dict:
 # Helpers (DB / Datas)
 # =========================
 def agora_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def tabela_existe(conn: sqlite3.Connection, nome: str) -> bool:
