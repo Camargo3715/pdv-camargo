@@ -1184,7 +1184,6 @@ def listar_vendas_itens_df(loja_id: int, filtro_produto: str = ""):
                 vi.preco_unit,
                 vi.qtd,
                 vi.total_item,
-                vc.forma_pagamento,
                 vc.id AS venda_id
             FROM vendas_itens vi
             JOIN vendas_cabecalho vc ON vc.id = vi.venda_id
@@ -1197,6 +1196,107 @@ def listar_vendas_itens_df(loja_id: int, filtro_produto: str = ""):
             conn,
             params=(int(loja_id), filtro),
         )
+    return df 
+
+# =========================
+# Histórico de pagamentos — MULTI-LOJA
+# =========================
+def listar_historico_pagamentos_df(loja_id: int):
+    with conectar() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                vc.id AS venda_id,
+                vc.datahora,
+                COALESCE(vc.total, 0) AS valor_total,
+                COALESCE(vc.recebido, 0) AS valor_recebido,
+                COALESCE(vc.troco, 0) AS troco,
+
+                COALESCE(SUM(CASE
+                    WHEN UPPER(vp.forma_pagamento) = 'DINHEIRO' THEN vp.valor
+                    ELSE 0
+                END), 0) AS valor_dinheiro,
+
+                COALESCE(SUM(CASE
+                    WHEN UPPER(vp.forma_pagamento) = 'PIX' THEN vp.valor
+                    ELSE 0
+                END), 0) AS valor_pix,
+
+                COALESCE(SUM(CASE
+                    WHEN UPPER(vp.forma_pagamento) IN (
+                        'CARTAO', 'CARTÃO',
+                        'CARTAO_CREDITO', 'CARTAO_DEBITO',
+                        'CREDITO', 'CRÉDITO',
+                        'DEBITO', 'DÉBITO'
+                    ) THEN vp.valor
+                    ELSE 0
+                END), 0) AS valor_cartao
+
+            FROM vendas_cabecalho vc
+            LEFT JOIN vendas_pagamentos vp
+                ON vp.venda_id = vc.id
+               AND vp.loja_id = vc.loja_id
+            WHERE
+                vc.loja_id = ?
+                AND vc.status = 'FINALIZADA'
+            GROUP BY
+                vc.id,
+                vc.datahora,
+                vc.total,
+                vc.recebido,
+                vc.troco
+            ORDER BY vc.datahora DESC, vc.id DESC
+            """,
+            conn,
+            params=(int(loja_id),),
+        )
+
+    if df.empty:
+        return df
+
+    def _f(v):
+        try:
+            return float(v or 0)
+        except Exception:
+            return 0.0
+
+    def montar_resumo(row):
+        partes = []
+
+        if _f(row["valor_dinheiro"]) > 0:
+            partes.append(f"DINHEIRO R$ {brl(_f(row['valor_dinheiro']))}")
+
+        if _f(row["valor_pix"]) > 0:
+            partes.append(f"PIX R$ {brl(_f(row['valor_pix']))}")
+
+        if _f(row["valor_cartao"]) > 0:
+            partes.append(f"CARTÃO R$ {brl(_f(row['valor_cartao']))}")
+
+        return " + ".join(partes) if partes else "—"
+
+    def classificar_pagamento(row):
+        qtd_formas = 0
+
+        if _f(row["valor_dinheiro"]) > 0:
+            qtd_formas += 1
+        if _f(row["valor_pix"]) > 0:
+            qtd_formas += 1
+        if _f(row["valor_cartao"]) > 0:
+            qtd_formas += 1
+
+        if qtd_formas > 1:
+            return "MISTO"
+        elif _f(row["valor_dinheiro"]) > 0:
+            return "DINHEIRO"
+        elif _f(row["valor_pix"]) > 0:
+            return "PIX"
+        elif _f(row["valor_cartao"]) > 0:
+            return "CARTÃO"
+        return "—"
+
+    df["pagamentos"] = df.apply(montar_resumo, axis=1)
+    df["tipo_pagamento"] = df.apply(classificar_pagamento, axis=1)
+
     return df
 
 # =========================
@@ -2497,20 +2597,156 @@ elif pagina == "📦 Estoque":
 
                     st.error(str(e))# Página: Histórico
 elif pagina == "📈 Histórico":
-    st.subheader(f"📈 Histórico de Vendas (itens) — {get_loja_nome(loja_id_ativa)}")
-    filtro = st.text_input("Filtrar por produto (contém)", value="")
-    df = listar_vendas_itens_df(loja_id_ativa, filtro_produto=filtro)
+    st.subheader(f"📈 Histórico — {get_loja_nome(loja_id_ativa)}")
 
-    if df.empty:
-        st.info("Sem vendas (ou filtro sem resultados) nesta loja.")
-    else:
-        total = float(df["total_item"].sum())
-        st.metric("Total vendido (itens filtrados)", f"R$ {brl(total)}")
+    aba1, aba2 = st.tabs(["🛒 Itens vendidos", "💳 Pagamentos"])
 
-        df_show = df.copy()
-        df_show["preco_unit"] = df_show["preco_unit"].map(lambda x: f"R$ {brl(x)}")
-        df_show["total_item"] = df_show["total_item"].map(lambda x: f"R$ {brl(x)}")
-        st.dataframe(df_show, width="stretch", hide_index=True)
+    # ==========================================================
+    # ABA 1 - ITENS VENDIDOS
+    # ==========================================================
+    with aba1:
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            filtro = st.text_input(
+                "Filtrar por produto (contém)",
+                value="",
+                key="hist_filtro_produto"
+            )
+
+        with col2:
+            ordenar_por = st.selectbox(
+                "Ordenar itens por",
+                ["Mais recentes", "Maior valor total", "Produto (A-Z)"],
+                key="hist_itens_ordem"
+            )
+
+        df = listar_vendas_itens_df(loja_id_ativa, filtro_produto=filtro)
+
+        if df.empty:
+            st.info("Sem vendas (ou filtro sem resultados) nesta loja.")
+        else:
+            if ordenar_por == "Maior valor total" and "total_item" in df.columns:
+                df = df.sort_values(by="total_item", ascending=False)
+            elif ordenar_por == "Produto (A-Z)" and "produto" in df.columns:
+                df = df.sort_values(by="produto", ascending=True)
+            elif "datahora" in df.columns:
+                df = df.sort_values(by="datahora", ascending=False)
+
+            total = float(df["total_item"].sum()) if "total_item" in df.columns else 0.0
+            qtd_itens = int(df["qtd"].sum()) if "qtd" in df.columns else 0
+            qtd_registros = len(df)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total vendido", f"R$ {brl(total)}")
+            c2.metric("Qtd. de itens", qtd_itens)
+            c3.metric("Registros", qtd_registros)
+
+            df_show = df.copy()
+
+            colunas_preferidas = [
+                "datahora",
+                "venda_id",
+                "codigo",
+                "produto",
+                "preco_unit",
+                "qtd",
+                "total_item",
+            ]
+
+            colunas_exibir = [c for c in colunas_preferidas if c in df_show.columns]
+            df_show = df_show[colunas_exibir].copy()
+
+            if "preco_unit" in df_show.columns:
+                df_show["preco_unit"] = df_show["preco_unit"].map(
+                    lambda x: f"R$ {brl(float(x or 0))}"
+                )
+
+            if "total_item" in df_show.columns:
+                df_show["total_item"] = df_show["total_item"].map(
+                    lambda x: f"R$ {brl(float(x or 0))}"
+                )
+
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+    # ==========================================================
+    # ABA 2 - PAGAMENTOS
+    # ==========================================================
+    with aba2:
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            filtro_pag = st.selectbox(
+                "Filtrar por forma de pagamento",
+                ["TODOS", "DINHEIRO", "PIX", "CARTÃO", "MISTO"],
+                key="hist_pag_filtro_forma"
+            )
+
+        with col2:
+            ordenar_pag = st.selectbox(
+                "Ordenar pagamentos por",
+                ["Mais recentes", "Maior valor", "Menor valor"],
+                key="hist_pag_ordem"
+            )
+
+        df_pag = listar_historico_pagamentos_df(loja_id_ativa)
+
+        if df_pag.empty:
+            st.info("Nenhum pagamento encontrado nesta loja.")
+        else:
+            if filtro_pag != "TODOS":
+                df_pag = df_pag[df_pag["tipo_pagamento"] == filtro_pag]
+
+            if ordenar_pag == "Maior valor" and "valor_total" in df_pag.columns:
+                df_pag = df_pag.sort_values(by="valor_total", ascending=False)
+            elif ordenar_pag == "Menor valor" and "valor_total" in df_pag.columns:
+                df_pag = df_pag.sort_values(by="valor_total", ascending=True)
+            elif "datahora" in df_pag.columns:
+                df_pag = df_pag.sort_values(by="datahora", ascending=False)
+
+            if df_pag.empty:
+                st.info("Nenhum pagamento encontrado com esse filtro.")
+            else:
+                total_vendas = float(df_pag["valor_total"].sum())
+                total_dinheiro = float(df_pag["valor_dinheiro"].sum())
+                total_pix = float(df_pag["valor_pix"].sum())
+                total_cartao = float(df_pag["valor_cartao"].sum())
+                qtd_vendas = len(df_pag)
+
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Vendas", qtd_vendas)
+                c2.metric("Total vendido", f"R$ {brl(total_vendas)}")
+                c3.metric("Dinheiro", f"R$ {brl(total_dinheiro)}")
+                c4.metric("PIX", f"R$ {brl(total_pix)}")
+                c5.metric("Cartão", f"R$ {brl(total_cartao)}")
+
+                df_show = df_pag.copy()
+
+                colunas_preferidas = [
+                    "datahora",
+                    "venda_id",
+                    "valor_total",
+                    "pagamentos",
+                    "troco",
+                    "tipo_pagamento",
+                ]
+
+                colunas_exibir = [c for c in colunas_preferidas if c in df_show.columns]
+                df_show = df_show[colunas_exibir].copy()
+
+                if "valor_total" in df_show.columns:
+                    df_show["valor_total"] = df_show["valor_total"].map(
+                        lambda x: f"R$ {brl(float(x or 0))}"
+                    )
+
+                if "troco" in df_show.columns:
+                    df_show["troco"] = df_show["troco"].map(
+                        lambda x: f"R$ {brl(float(x or 0))}"
+                    )
+
+                st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+
 
 # Página: Relatórios
 elif pagina == "📅 Relatórios":
