@@ -2,5 +2,9 @@
 *.pyc
 *.pyo
 *.pyd
-.pdv/
+.pyd/
 .env
+
+*.db
+*.csv
+_old/
