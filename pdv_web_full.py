@@ -2257,11 +2257,35 @@ if pagina == "🧾 Caixa (PDV)":
 
             st.markdown("### Pagamentos")
 
-            dinheiro_txt = st.text_input("Dinheiro (R$)", key="dinheiro")
-            pix_txt = st.text_input("PIX (R$)", key="pix")
-            credito_txt = st.text_input("Cartão Crédito (R$)", key="credito")
-            debito_txt = st.text_input("Cartão Débito (R$)", key="debito")
-            recebido_dinheiro_txt = st.text_input("Recebido em dinheiro (para troco)", key="recebido")
+            dinheiro_txt = st.text_input(
+             "Dinheiro (R$)",
+            key="dinheiro",
+            value=st.session_state.get("dinheiro", "0")
+            )
+
+            pix_txt = st.text_input(
+             "PIX (R$)",
+              key="pix",
+              value=st.session_state.get("pix", "0")
+            ) 
+
+            credito_txt = st.text_input(
+              "Cartão Crédito (R$)",
+               key="credito",
+               value=st.session_state.get("credito", "0")
+            )
+
+            debito_txt = st.text_input(
+            "Cartão Débito (R$)",
+              key="debito",
+              value=st.session_state.get("debito", "0")
+            )
+
+            recebido_dinheiro_txt = st.text_input(
+              "Recebido em dinheiro (para troco)",
+              key="recebido",
+              value=st.session_state.get("recebido", "0")
+            )
 
             valor_dinheiro = max(0.0, to_float(dinheiro_txt))
             valor_pix = max(0.0, to_float(pix_txt))
