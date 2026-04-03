@@ -1764,6 +1764,10 @@ if "loja_id_ativa" not in st.session_state:
 if "pagina" not in st.session_state:
     st.session_state.pagina = "🧾 Caixa (PDV)"
 
+    # controle de reset da venda
+if "reset_venda" not in st.session_state:
+    st.session_state.reset_venda = 0
+
 st.title(APP_TITLE)
 st.caption(f"DB: {DB_PATH}")
 st.caption(f"Backup dir: {BACKUP_DIR} | Enabled: {BACKUP_ENABLED}")
@@ -2259,32 +2263,27 @@ if pagina == "🧾 Caixa (PDV)":
 
             dinheiro_txt = st.text_input(
              "Dinheiro (R$)",
-            key="dinheiro",
-            value=st.session_state.get("dinheiro", "0")
+             key=f"dinheiro_{st.session_state.reset_venda}"
             )
 
             pix_txt = st.text_input(
              "PIX (R$)",
-              key="pix",
-              value=st.session_state.get("pix", "0")
-            ) 
+              key=f"pix_{st.session_state.reset_venda}"
+            )
 
             credito_txt = st.text_input(
-              "Cartão Crédito (R$)",
-               key="credito",
-               value=st.session_state.get("credito", "0")
+             "Cartão Crédito (R$)",
+             key=f"credito_{st.session_state.reset_venda}"
             )
 
             debito_txt = st.text_input(
-            "Cartão Débito (R$)",
-              key="debito",
-              value=st.session_state.get("debito", "0")
+             "Cartão Débito (R$)",
+              key=f"debito_{st.session_state.reset_venda}"
             )
 
             recebido_dinheiro_txt = st.text_input(
               "Recebido em dinheiro (para troco)",
-              key="recebido",
-              value=st.session_state.get("recebido", "0")
+               key=f"recebido_{st.session_state.reset_venda}"
             )
 
             valor_dinheiro = max(0.0, to_float(dinheiro_txt))
@@ -2412,9 +2411,8 @@ if pagina == "🧾 Caixa (PDV)":
                         st.session_state.cart = []
                         st.session_state.confirmar_venda = False
 
-                        for campo in ["dinheiro", "pix", "credito", "debito", "recebido", "desconto"]:
-                           if campo in st.session_state:
-                             del st.session_state[campo]
+                        # 💣 ESSA LINHA É A CHAVE
+                        st.session_state.reset_venda += 1
 
                         st.rerun()
 
