@@ -1167,36 +1167,6 @@ def baixar_estoque_por_codigo(loja_id: int, codigo: str, qtd: int):
             raise RuntimeError("Estoque insuficiente ou produto não encontrado.")
         conn.commit()
 
-
-# =========================
-# Histórico (itens vendidos) — MULTI-LOJA
-# =========================
-def listar_vendas_itens_df(loja_id: int, filtro_produto: str = ""):
-    filtro = f"%{(filtro_produto or '').strip()}%"
-    with conectar() as conn:
-        df = pd.read_sql_query(
-            """
-            SELECT
-                vc.datahora,
-                vi.codigo,
-                vi.produto,
-                vi.preco_unit,
-                vi.qtd,
-                vi.total_item,
-                vc.id AS venda_id
-            FROM vendas_itens vi
-            JOIN vendas_cabecalho vc ON vc.id = vi.venda_id
-            WHERE
-                vi.loja_id = ?
-                AND vc.status = 'FINALIZADA'
-                AND vi.produto LIKE ?
-            ORDER BY vc.datahora DESC, vi.id DESC
-            """,
-            conn,
-            params=(int(loja_id), filtro),
-        )
-    return df 
-
 # =========================
 # Histórico de pagamentos — MULTI-LOJA
 # =========================
@@ -1297,6 +1267,115 @@ def listar_historico_pagamentos_df(loja_id: int):
     df["tipo_pagamento"] = df.apply(classificar_pagamento, axis=1)
 
     return df
+
+
+def excluir_venda_db(loja_id: int, venda_id: int, devolver_estoque: bool = True):
+    loja_id = int(loja_id)
+    venda_id = int(venda_id)
+
+    with conectar() as conn:
+        cur = conn.cursor()
+
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+
+            # verifica se a venda existe
+            cur.execute(
+                """
+                SELECT id
+                FROM vendas_cabecalho
+                WHERE id = ? AND loja_id = ?
+                """,
+                (venda_id, loja_id),
+            )
+            venda = cur.fetchone()
+
+            if not venda:
+                raise RuntimeError("Venda não encontrada.")
+
+            # busca itens da venda
+            cur.execute(
+                """
+                SELECT codigo, qtd
+                FROM vendas_itens
+                WHERE venda_id = ? AND loja_id = ?
+                """,
+                (venda_id, loja_id),
+            )
+            itens = cur.fetchall()
+
+            # devolve estoque
+            if devolver_estoque:
+                for item in itens:
+                    codigo = str(item["codigo"] or "").strip()
+                    qtd = int(item["qtd"] or 0)
+
+                    if codigo and qtd > 0:
+                        cur.execute(
+                            """
+                            UPDATE produtos
+                            SET quantidade = quantidade + ?
+                            WHERE loja_id = ? AND codigo = ?
+                            """,
+                            (qtd, loja_id, codigo),
+                        )
+
+            # apaga pagamentos
+            cur.execute(
+                """
+                DELETE FROM vendas_pagamentos
+                WHERE venda_id = ? AND loja_id = ?
+                """,
+                (venda_id, loja_id),
+            )
+
+            # apaga itens
+            cur.execute(
+                """
+                DELETE FROM vendas_itens
+                WHERE venda_id = ? AND loja_id = ?
+                """,
+                (venda_id, loja_id),
+            )
+
+            # apaga cabeçalho
+            cur.execute(
+                """
+                DELETE FROM vendas_cabecalho
+                WHERE id = ? AND loja_id = ?
+                """,
+                (venda_id, loja_id),
+            )
+
+            if cur.rowcount == 0:
+                raise RuntimeError("Não foi possível excluir a venda.")
+
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def listar_itens_da_venda_df(loja_id: int, venda_id: int):
+    with conectar() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                codigo,
+                produto,
+                preco_unit,
+                qtd,
+                total_item
+            FROM vendas_itens
+            WHERE loja_id = ? AND venda_id = ?
+            ORDER BY id ASC
+            """,
+            conn,
+            params=(int(loja_id), int(venda_id)),
+        )
+    return df
+
 
 # =========================
 # Caixa (Abertura/Fechamento) — MULTI-LOJA
@@ -1476,6 +1555,24 @@ def registrar_venda_completa_db(
 
     if round(total_pagamentos, 2) < round(total, 2):
         raise RuntimeError("Valor pago é menor que o total da venda.")
+
+    total_dinheiro = sum(
+        float(p.get("valor", 0))
+        for p in pagamentos
+        if str(p.get("forma_pagamento", "")).upper() == "DINHEIRO"
+    )
+
+    total_nao_dinheiro = total_pagamentos - total_dinheiro
+
+    if round(total_nao_dinheiro, 2) > round(total, 2):
+        raise RuntimeError("PIX/cartão não podem ultrapassar o total da venda.")
+
+    tem_dinheiro = total_dinheiro > 0
+
+    if not tem_dinheiro and round(total_pagamentos, 2) != round(total, 2):
+        raise RuntimeError(
+            "Sem dinheiro na venda, a soma dos pagamentos deve ser igual ao total."
+        )
 
     # define forma resumo
     if len(pagamentos) == 1:
@@ -2773,8 +2870,72 @@ elif pagina == "📈 Histórico":
                     )
 
                 st.dataframe(df_show, use_container_width=True, hide_index=True)
+ 
+                st.divider()
+                st.subheader("📄 Detalhes da venda")
 
+                venda_detalhe = st.selectbox(
+                    "Selecione a venda para ver os itens",
+                    df_pag["venda_id"].astype(int).tolist(),
+                    key="hist_detalhe_venda"
+                )
 
+                df_itens_venda = listar_itens_da_venda_df(
+                    loja_id=loja_id_ativa,
+                    venda_id=int(venda_detalhe)
+                )
+
+                if df_itens_venda.empty:
+                    st.info("Nenhum item encontrado para esta venda.")
+                else:
+                    df_itens_show = df_itens_venda.copy()
+
+                    if "preco_unit" in df_itens_show.columns:
+                        df_itens_show["preco_unit"] = df_itens_show["preco_unit"].map(
+                            lambda x: f"R$ {brl(float(x or 0))}"
+                        )
+
+                    if "total_item" in df_itens_show.columns:
+                        df_itens_show["total_item"] = df_itens_show["total_item"].map(
+                            lambda x: f"R$ {brl(float(x or 0))}"
+                        )
+
+                    st.dataframe(df_itens_show, use_container_width=True, hide_index=True)
+
+                st.divider()
+                st.subheader("🗑️ Excluir venda")
+
+                venda_excluir = st.selectbox(
+                    "Selecione a venda para excluir",
+                    df_pag["venda_id"].astype(int).tolist(),
+                    key="hist_excluir_venda"
+                )
+
+                devolver_estoque = st.checkbox(
+                    "Devolver itens ao estoque",
+                    value=True,
+                    key="hist_devolver_estoque"
+                )
+
+                confirmar_exclusao = st.checkbox(
+                    f"Confirmo a exclusão da venda #{venda_excluir}",
+                    key="hist_confirmar_exclusao"
+                )
+
+                if st.button("Excluir venda selecionada", type="primary"):
+                    if not confirmar_exclusao:
+                        st.warning("Marque a confirmação antes de excluir.")
+                    else:
+                        try:
+                            excluir_venda_db(
+                                loja_id=loja_id_ativa,
+                                venda_id=int(venda_excluir),
+                                devolver_estoque=devolver_estoque
+                            )
+                            st.success(f"Venda #{venda_excluir} excluída com sucesso.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
 
 # Página: Relatórios
 elif pagina == "📅 Relatórios":
