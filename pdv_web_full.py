@@ -2388,13 +2388,9 @@ if pagina == "🧾 Caixa (PDV)":
                         st.session_state.cart = []
                         st.session_state.confirmar_venda = False
 
-                        # 👇 ADICIONA ISSO
-                        st.session_state.desconto = "0"
-                        st.session_state.dinheiro = "0"
-                        st.session_state.pix = "0"
-                        st.session_state.credito = "0"
-                        st.session_state.debito = "0"
-                        st.session_state.recebido = "0"
+                        for campo in ["dinheiro", "pix", "credito", "debito", "recebido", "desconto"]:
+                           if campo in st.session_state:
+                             del st.session_state[campo]
 
                         st.rerun()
 
