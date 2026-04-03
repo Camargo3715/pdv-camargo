@@ -19,7 +19,7 @@ import pandas as pd
 from streamlit_searchbox import st_searchbox
 
 
-APP_TITLE = "PDV Camargo Celulares — Web"
+APP_TITLE = "PDV Camargo Celulares 2.0 — Web"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # =========================
@@ -2386,7 +2386,17 @@ if pagina == "🧾 Caixa (PDV)":
 
                         st.session_state.cart = []
                         st.session_state.confirmar_venda = False
+
+                        # 👇 ADICIONA ISSO
+                        st.session_state.desconto = "0"
+                        st.session_state.dinheiro = "0"
+                        st.session_state.pix = "0"
+                        st.session_state.credito = "0"
+                        st.session_state.debito = "0"
+                        st.session_state.recebido = "0"
+
                         st.rerun()
+
 
                 with b2:
                     if st.button("❌ CANCELAR", key="btn_cancelar_venda"):
