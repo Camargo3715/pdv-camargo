@@ -1783,6 +1783,36 @@ def cupom_txt(
     return "\n".join(linhas)
 
 # =========================
+# Histórico (itens vendidos) — MULTI-LOJA
+# =========================
+def listar_vendas_itens_df(loja_id: int, filtro_produto: str = ""):
+    filtro = f"%{(filtro_produto or '').strip()}%"
+    with conectar() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                vc.datahora,
+                vi.codigo,
+                vi.produto,
+                vi.preco_unit,
+                vi.qtd,
+                vi.total_item,
+                vc.id AS venda_id
+            FROM vendas_itens vi
+            JOIN vendas_cabecalho vc ON vc.id = vi.venda_id
+            WHERE
+                vi.loja_id = ?
+                AND vc.status = 'FINALIZADA'
+                AND vi.produto LIKE ?
+            ORDER BY vc.datahora DESC, vi.id DESC
+            """,
+            conn,
+            params=(int(loja_id), filtro),
+        )
+    return df
+
+
+# =========================
 # Relatórios — MULTI-LOJA
 # =========================
 def listar_vendas_por_periodo_df(loja_id: int, dt_ini: datetime, dt_fim: datetime):
