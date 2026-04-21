@@ -2316,17 +2316,26 @@ if pagina == "🧾 Caixa (PDV)":
             df_edit = df_cart[["codigo", "produto", "preco_unit", "qtd"]].copy()
 
             edited = st.data_editor(
-                df_edit,
-                width="stretch",
-                hide_index=True,
-                num_rows="fixed",
-                disabled=["codigo", "produto"],
-                column_config={
-                    "preco_unit": st.column_config.NumberColumn("Preço unit.", min_value=0.0, step=0.5),
-                    "qtd": st.column_config.NumberColumn("Qtd", min_value=1, step=1),
-                },
-                key="cart_editor",
-            )
+    df_edit,
+    width="stretch",
+    hide_index=True,
+    num_rows="fixed",
+    disabled=["codigo", "produto"],
+    column_config={
+        "preco_unit": st.column_config.NumberColumn(
+            "Preço unit.",
+            min_value=0.0,
+            step=0.01,
+            format="%.2f",
+        ),
+        "qtd": st.column_config.NumberColumn(
+            "Qtd",
+            min_value=1,
+            step=1
+        ),
+    },
+    key="cart_editor",
+)
 
             new_cart = []
             for i in range(len(edited)):
