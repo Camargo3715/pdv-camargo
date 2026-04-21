@@ -2386,14 +2386,32 @@ if pagina == "🧾 Caixa (PDV)":
         else:
             sid = int(_sess_get(sess, "id", 0) or 0)
 
-            desconto_txt = st.text_input("Desconto (R$)", value="0")
+            # =========================
+            # Desconto (corrigido)
+            # =========================
+            if "desconto" not in st.session_state:
+                 st.session_state.desconto = 0.0
+
+            desconto = st.number_input(
+            "Desconto (R$)",
+            min_value=0.0,
+            step=0.01,
+            format="%.2f",
+            key="desconto"
+            )
 
             df_cart = pd.DataFrame(st.session_state.cart) if st.session_state.cart else pd.DataFrame()
-            subtotal = float(df_cart["total_item"].sum()) if (not df_cart.empty and "total_item" in df_cart.columns) else 0.0
 
-            desconto = to_float(desconto_txt)
+            subtotal = (
+            float(df_cart["total_item"].sum())
+            if (not df_cart.empty and "total_item" in df_cart.columns)
+            else 0.0
+            )
+
+            # garante que o desconto nunca passe do subtotal
             desconto = max(0.0, min(desconto, subtotal))
-            total_liq = max(0.0, subtotal - float(desconto))
+
+            total_liq: float = max(0.0, subtotal - desconto)
 
             st.markdown("### Pagamentos")
 
