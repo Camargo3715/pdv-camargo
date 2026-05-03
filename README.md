@@ -54,11 +54,27 @@ Este projeto foi desenvolvido com o objetivo de aplicar na prática conceitos de
 
 
 
-\*(adicione prints aqui futuramente)\*
+\### 🔐 Tela de Login
+
+!\[Login](assets/login.png)
 
 
 
-\---
+\### 💰 Caixa (PDV)
+
+!\[Caixa](assets/caixa.png)
+
+
+
+\### 📦 Estoque
+
+!\[Estoque](assets/estoque.png)
+
+
+
+\### 📊 Relatórios
+
+!\[Relatorios](assets/relatorios.png)
 
 
 
