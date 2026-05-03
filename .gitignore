@@ -9,5 +9,3 @@ venv/
 *.db
 *.csv
 *.log
-
-_old/
