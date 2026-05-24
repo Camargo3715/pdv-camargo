@@ -17,6 +17,9 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 import pandas as pd
 from streamlit_searchbox import st_searchbox
+from modulos.assistencia.assistencia_db import inicializar_assistencia, buscar_os_por_token
+from modulos.assistencia.assistencia_ui import tela_assistencia
+from modulos.assistencia.assistencia_qrcode import gerar_qrcode_os
 
 
 APP_TITLE = "PDV Camargo Celulares 2.0 — Web"
@@ -1874,24 +1877,64 @@ st.set_page_config(page_title=APP_TITLE, layout="wide")
 # Inicializa banco e usuários
 inicializar_banco()
 inicializar_usuarios()
+inicializar_assistencia()
 
-# ✅ Estados globais (blindagem NameError)
+# =========================
+# Página pública da OS (QR Code)
+# =========================
+params = st.query_params
+
+if "token" in params:
+
+    token = params["token"]
+
+    ordem = buscar_os_por_token(token)
+
+    st.title("🔧 Acompanhamento da Ordem de Serviço")
+
+    if not ordem:
+        st.error("OS não encontrada.")
+        st.stop()
+
+    st.success(f"OS #{ordem['id']} encontrada")
+
+    st.write(f"**Cliente:** {ordem['cliente_nome']}")
+    st.write(f"**Aparelho:** {ordem['aparelho']}")
+    st.write(f"**Marca:** {ordem['marca']}")
+    st.write(f"**Modelo:** {ordem['modelo']}")
+    st.write(f"**Defeito informado:** {ordem['defeito']}")
+    st.write(f"**Status:** {ordem['status']}")
+    st.write(f"**Entrada:** {ordem['data_entrada']}")
+
+    st.info("Acompanhe aqui o andamento do seu aparelho.")
+
+    st.stop()
+
+# =========================
+# Estados globais
+# =========================
 if "auth" not in st.session_state:
     st.session_state.auth = None
+
 if "cart" not in st.session_state:
     st.session_state.cart = []
+
 if "cupom_txt" not in st.session_state:
     st.session_state.cupom_txt = None
+
 if "cupom_nome" not in st.session_state:
     st.session_state.cupom_nome = None
+
 if "cupom_id" not in st.session_state:
     st.session_state.cupom_id = None
+
 if "loja_id_ativa" not in st.session_state:
     st.session_state.loja_id_ativa = None
+
 if "pagina" not in st.session_state:
     st.session_state.pagina = "🧾 Caixa (PDV)"
 
-    # controle de reset da venda
+# controle de reset da venda
 if "reset_venda" not in st.session_state:
     st.session_state.reset_venda = 0
 
@@ -2004,6 +2047,7 @@ paginas = [
     "📦 Estoque",
     "📈 Histórico",
     "📅 Relatórios",
+    "🔧 Assistência Técnica",
 ]
 
 # ✅ Painel do Proprietário (Admin e Dono)
@@ -3028,6 +3072,10 @@ elif pagina == "📅 Relatórios":
         dfd_show["total"] = dfd_show["total"].map(lambda x: f"R$ {brl(x)}")
         st.dataframe(dfd_show, width="stretch", hide_index=True)
 
+# Página: Assistência Técnica
+elif pagina == "🔧 Assistência Técnica":
+    tela_assistencia()       
+
 # Página: Usuários (Admin)
 elif pagina == "👤 Usuários (Admin)":
     if tipo != "admin":
@@ -3095,11 +3143,6 @@ elif pagina == "🧨 Zerar Loja (Admin)":
         st.success("✅ Loja zerada com sucesso!")
         st.json(res)
         st.rerun()
-
-# Página: Zerar Loja (Admin)
-elif pagina == "🧨 Zerar Loja (Admin)":
-    ...
-    st.rerun()
 
 
 # =========================
