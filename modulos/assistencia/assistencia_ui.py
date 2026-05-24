@@ -1,28 +1,3 @@
-import os
-import streamlit as st
-import pandas as pd
-
-from modulos.assistencia.assistencia_db import *
-from modulos.assistencia.assistencia_qrcode import gerar_qrcode_os
-from modulos.assistencia.assistencia_pdf import gerar_pdf_os
-
-
-def tela_assistencia():
-
-    st.title("🔧 Assistência Técnica")
-
-    if "ultimo_pdf_os" not in st.session_state:
-        st.session_state.ultimo_pdf_os = None
-
-    if "ultimo_os_id" not in st.session_state:
-        st.session_state.ultimo_os_id = None
-
-    if "ultimo_qr_os" not in st.session_state:
-        st.session_state.ultimo_qr_os = None
-
-    if "ultimo_link_os" not in st.session_state:
-        st.session_state.ultimo_link_os = None
-
     # =========================
     # CONFIGURAÇÃO DAS LOJAS
     # =========================
@@ -30,6 +5,10 @@ def tela_assistencia():
     st.subheader("🏪 Configuração das Lojas")
 
     lojas = listar_lojas()
+
+    if not lojas:
+        criar_loja(nome="CAMARGO CELULARES")
+        lojas = listar_lojas()
 
     loja_ids = [loja["id"] for loja in lojas]
 
@@ -44,59 +23,16 @@ def tela_assistencia():
 
     with st.expander("Editar dados da loja"):
 
-        nome_loja = st.text_input(
-            "Nome da loja",
-            value=loja_dados["nome"] or "",
-            key=f"nome_loja_{loja_config_id}"
-        )
+        nome_loja = st.text_input("Nome da loja", value=loja_dados["nome"] or "", key=f"nome_loja_{loja_config_id}")
+        subtitulo_loja = st.text_input("Subtítulo", value=loja_dados["subtitulo"] or "", key=f"subtitulo_loja_{loja_config_id}")
+        whatsapp_loja = st.text_input("WhatsApp", value=loja_dados["whatsapp"] or "", key=f"whatsapp_loja_{loja_config_id}")
+        rua_loja = st.text_input("Rua", value=loja_dados["rua"] or "", key=f"rua_loja_{loja_config_id}")
+        numero_loja = st.text_input("Número", value=loja_dados["numero"] or "", key=f"numero_loja_{loja_config_id}")
+        bairro_loja = st.text_input("Bairro", value=loja_dados["bairro"] or "", key=f"bairro_loja_{loja_config_id}")
+        cidade_loja = st.text_input("Cidade", value=loja_dados["cidade"] or "", key=f"cidade_loja_{loja_config_id}")
+        cep_loja = st.text_input("CEP", value=loja_dados["cep"] or "", key=f"cep_loja_{loja_config_id}")
 
-        subtitulo_loja = st.text_input(
-            "Subtítulo",
-            value=loja_dados["subtitulo"] or "",
-            key=f"subtitulo_loja_{loja_config_id}"
-        )
-
-        whatsapp_loja = st.text_input(
-            "WhatsApp",
-            value=loja_dados["whatsapp"] or "",
-            key=f"whatsapp_loja_{loja_config_id}"
-        )
-
-        rua_loja = st.text_input(
-            "Rua",
-            value=loja_dados["rua"] or "",
-            key=f"rua_loja_{loja_config_id}"
-        )
-
-        numero_loja = st.text_input(
-            "Número",
-            value=loja_dados["numero"] or "",
-            key=f"numero_loja_{loja_config_id}"
-        )
-
-        bairro_loja = st.text_input(
-            "Bairro",
-            value=loja_dados["bairro"] or "",
-            key=f"bairro_loja_{loja_config_id}"
-        )
-
-        cidade_loja = st.text_input(
-            "Cidade",
-            value=loja_dados["cidade"] or "",
-            key=f"cidade_loja_{loja_config_id}"
-        )
-
-        cep_loja = st.text_input(
-            "CEP",
-            value=loja_dados["cep"] or "",
-            key=f"cep_loja_{loja_config_id}"
-        )
-
-        if st.button(
-            "Salvar dados da loja",
-            key=f"salvar_loja_{loja_config_id}"
-        ):
-
+        if st.button("Salvar dados da loja", key=f"salvar_loja_{loja_config_id}"):
             atualizar_loja(
                 loja_id=loja_config_id,
                 nome=nome_loja,
@@ -119,6 +55,13 @@ def tela_assistencia():
     # =========================
 
     st.subheader("Nova Ordem de Serviço")
+
+    lojas = listar_lojas()
+
+    nomes_lojas = {
+        f"{loja['nome']} - Loja {loja['id']}": loja["id"]
+        for loja in lojas
+    }
 
     with st.form("nova_os"):
 
@@ -193,7 +136,6 @@ def tela_assistencia():
                 senha=senha,
                 valor_servico=valor_servico,
                 qr_path=caminho_qr,
-
                 loja_nome=loja_pdf["nome"],
                 loja_subtitulo=loja_pdf["subtitulo"],
                 loja_whatsapp=loja_pdf["whatsapp"],
@@ -211,21 +153,13 @@ def tela_assistencia():
 
     if st.session_state.ultimo_os_id:
 
-        st.success(
-            f"OS criada com sucesso: #{st.session_state.ultimo_os_id}"
-        )
+        st.success(f"OS criada com sucesso: #{st.session_state.ultimo_os_id}")
 
-        st.image(
-            st.session_state.ultimo_qr_os,
-            width=200
-        )
+        st.image(st.session_state.ultimo_qr_os, width=200)
 
-        st.code(
-            st.session_state.ultimo_link_os
-        )
+        st.code(st.session_state.ultimo_link_os)
 
         with open(st.session_state.ultimo_pdf_os, "rb") as f:
-
             st.download_button(
                 "📄 Baixar comprovante PDF",
                 f,
