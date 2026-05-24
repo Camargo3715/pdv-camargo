@@ -9,7 +9,7 @@ def gerar_qrcode_os(token_publico: str, os_id: int):
     os.makedirs(PASTA_QRCODES, exist_ok=True)
 
     # depois trocamos pelo link do Render
-    base_url = "https://assistencia.camargotech.com.br"
+    base_url = "https://pdv-camargo.onrender.com"
 
     link = f"{base_url}/?token={token_publico}"
 
