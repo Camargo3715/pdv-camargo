@@ -23,97 +23,96 @@ def tela_assistencia():
     if "ultimo_link_os" not in st.session_state:
         st.session_state.ultimo_link_os = None
 
-    # =========================
-    # CONFIGURAÇÃO DAS LOJAS
-    # =========================
+# =========================
+# CONFIGURAÇÃO DAS LOJAS
+# =========================
 
-    st.subheader("🏪 Configuração das Lojas")
+st.subheader("🏪 Configuração das Lojas")
 
-    lojas = listar_lojas()
+lojas = listar_lojas()
 
-    nomes_lojas = {
-        loja["nome"]: loja["id"]
-        for loja in lojas
-    }
+loja_ids = [loja["id"] for loja in lojas]
 
-    loja_config_nome = st.selectbox(
-        "Selecione a loja para editar",
-        list(nomes_lojas.keys()),
-        key="config_loja"
+loja_config_id = st.selectbox(
+    "Selecione a loja para editar",
+    loja_ids,
+    format_func=lambda loja_id: buscar_loja_por_id(loja_id)["nome"],
+    key="config_loja_id"
+)
+
+loja_dados = buscar_loja_por_id(loja_config_id)
+
+with st.expander("Editar dados da loja"):
+
+    nome_loja = st.text_input(
+        "Nome da loja",
+        value=loja_dados["nome"] or "",
+        key=f"nome_loja_{loja_config_id}"
     )
 
-    loja_config_id = nomes_lojas[loja_config_nome]
+    subtitulo_loja = st.text_input(
+        "Subtítulo",
+        value=loja_dados["subtitulo"] or "",
+        key=f"subtitulo_loja_{loja_config_id}"
+    )
 
-    loja_dados = buscar_loja_por_id(loja_config_id)
+    whatsapp_loja = st.text_input(
+        "WhatsApp",
+        value=loja_dados["whatsapp"] or "",
+        key=f"whatsapp_loja_{loja_config_id}"
+    )
 
-    with st.expander("Editar dados da loja"):
+    rua_loja = st.text_input(
+        "Rua",
+        value=loja_dados["rua"] or "",
+        key=f"rua_loja_{loja_config_id}"
+    )
 
-        nome_loja = st.text_input(
-            "Nome da loja",
-            value=loja_dados["nome"] or "",
-            key="nome_loja"
+    numero_loja = st.text_input(
+        "Número",
+        value=loja_dados["numero"] or "",
+        key=f"numero_loja_{loja_config_id}"
+    )
+
+    bairro_loja = st.text_input(
+        "Bairro",
+        value=loja_dados["bairro"] or "",
+        key=f"bairro_loja_{loja_config_id}"
+    )
+
+    cidade_loja = st.text_input(
+        "Cidade",
+        value=loja_dados["cidade"] or "",
+        key=f"cidade_loja_{loja_config_id}"
+    )
+
+    cep_loja = st.text_input(
+        "CEP",
+        value=loja_dados["cep"] or "",
+        key=f"cep_loja_{loja_config_id}"
+    )
+
+    if st.button(
+        "Salvar dados da loja",
+        key=f"salvar_loja_{loja_config_id}"
+    ):
+
+        atualizar_loja(
+            loja_id=loja_config_id,
+            nome=nome_loja,
+            subtitulo=subtitulo_loja,
+            whatsapp=whatsapp_loja,
+            rua=rua_loja,
+            numero=numero_loja,
+            bairro=bairro_loja,
+            cidade=cidade_loja,
+            cep=cep_loja
         )
 
-        subtitulo_loja = st.text_input(
-            "Subtítulo",
-            value=loja_dados["subtitulo"] or "",
-            key="subtitulo_loja"
-        )
+        st.success("Dados da loja atualizados!")
+        st.rerun()
 
-        whatsapp_loja = st.text_input(
-            "WhatsApp",
-            value=loja_dados["whatsapp"] or "",
-            key="whatsapp_loja"
-        )
-
-        rua_loja = st.text_input(
-            "Rua",
-            value=loja_dados["rua"] or "",
-            key="rua_loja"
-        )
-
-        numero_loja = st.text_input(
-            "Número",
-            value=loja_dados["numero"] or "",
-            key="numero_loja"
-        )
-
-        bairro_loja = st.text_input(
-            "Bairro",
-            value=loja_dados["bairro"] or "",
-            key="bairro_loja"
-        )
-
-        cidade_loja = st.text_input(
-            "Cidade",
-            value=loja_dados["cidade"] or "",
-            key="cidade_loja"
-        )
-
-        cep_loja = st.text_input(
-            "CEP",
-            value=loja_dados["cep"] or "",
-            key="cep_loja"
-        )
-
-        if st.button("Salvar dados da loja"):
-
-            atualizar_loja(
-                loja_id=loja_config_id,
-                nome=nome_loja,
-                subtitulo=subtitulo_loja,
-                whatsapp=whatsapp_loja,
-                rua=rua_loja,
-                numero=numero_loja,
-                bairro=bairro_loja,
-                cidade=cidade_loja,
-                cep=cep_loja
-            )
-
-            st.success("Dados da loja atualizados!")
-            st.rerun()
-
-    st.divider()
+st.divider()
 
     # =========================
     # NOVA OS
