@@ -12,6 +12,25 @@ def tela_assistencia():
     st.title("🔧 Assistência Técnica")
 
     loja_atual_id = st.session_state.get("loja_id_ativa", 1)
+    loja_atual_id = int(loja_atual_id or 1)
+
+    loja_dados = buscar_loja_por_id(loja_atual_id)
+
+    if loja_dados is None:
+        lojas = listar_lojas()
+
+        if lojas:
+            loja_atual_id = int(lojas[0]["id"])
+            st.session_state["loja_id_ativa"] = loja_atual_id
+            loja_dados = buscar_loja_por_id(loja_atual_id)
+        else:
+            criar_loja(nome="Loja 1")
+            criar_loja(nome="Loja 2")
+            criar_loja(nome="Loja 3")
+            lojas = listar_lojas()
+            loja_atual_id = int(lojas[0]["id"])
+            st.session_state["loja_id_ativa"] = loja_atual_id
+            loja_dados = buscar_loja_por_id(loja_atual_id)
 
     if "ultimo_pdf_os" not in st.session_state:
         st.session_state.ultimo_pdf_os = None
