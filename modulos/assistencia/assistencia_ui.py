@@ -1,6 +1,24 @@
-    # =========================
-    # CONFIGURAÇÃO DAS LOJAS
-    # =========================
+import os
+import streamlit as st
+import pandas as pd
+
+from modulos.assistencia.assistencia_db import *
+from modulos.assistencia.assistencia_qrcode import gerar_qrcode_os
+from modulos.assistencia.assistencia_pdf import gerar_pdf_os
+
+
+def tela_assistencia():
+
+    st.title("🔧 Assistência Técnica")
+
+    if "ultimo_pdf_os" not in st.session_state:
+        st.session_state.ultimo_pdf_os = None
+    if "ultimo_os_id" not in st.session_state:
+        st.session_state.ultimo_os_id = None
+    if "ultimo_qr_os" not in st.session_state:
+        st.session_state.ultimo_qr_os = None
+    if "ultimo_link_os" not in st.session_state:
+        st.session_state.ultimo_link_os = None
 
     st.subheader("🏪 Configuração das Lojas")
 
@@ -33,6 +51,7 @@
         cep_loja = st.text_input("CEP", value=loja_dados["cep"] or "", key=f"cep_loja_{loja_config_id}")
 
         if st.button("Salvar dados da loja", key=f"salvar_loja_{loja_config_id}"):
+
             atualizar_loja(
                 loja_id=loja_config_id,
                 nome=nome_loja,
@@ -49,10 +68,6 @@
             st.rerun()
 
     st.divider()
-
-    # =========================
-    # NOVA OS
-    # =========================
 
     st.subheader("Nova Ordem de Serviço")
 
@@ -115,10 +130,7 @@
                 loja_id=loja_id
             )
 
-            caminho_qr, link_os = gerar_qrcode_os(
-                token_publico,
-                os_id
-            )
+            caminho_qr, link_os = gerar_qrcode_os(token_publico, os_id)
 
             loja_pdf = buscar_loja_por_id(loja_id)
 
@@ -169,17 +181,12 @@
 
     st.divider()
 
-    # =========================
-    # LISTAGEM
-    # =========================
-
     st.subheader("Ordens de Serviço")
 
     dados = listar_os()
     lista = []
 
     for os_item in dados:
-
         lista.append({
             "OS": os_item["id"],
             "Loja": os_item["loja_nome"],
@@ -196,27 +203,16 @@
         })
 
     if lista:
-
         df = pd.DataFrame(lista)
-
-        st.dataframe(
-            df,
-            use_container_width=True
-        )
-
+        st.dataframe(df, use_container_width=True)
     else:
         st.info("Nenhuma OS cadastrada.")
 
     st.divider()
 
-    # =========================
-    # STATUS
-    # =========================
-
     st.subheader("Alterar Status da OS")
 
     if lista:
-
         os_ids = [item["OS"] for item in lista]
 
         os_selecionada = st.selectbox(
@@ -252,14 +248,9 @@
 
     st.divider()
 
-    # =========================
-    # EXCLUIR OS
-    # =========================
-
     st.subheader("Excluir OS")
 
     if lista:
-
         os_ids_excluir = [item["OS"] for item in lista]
 
         os_para_excluir = st.selectbox(
@@ -276,13 +267,8 @@
         if st.button("🗑️ Excluir OS", type="secondary"):
 
             if not confirmar_exclusao:
-
-                st.warning(
-                    "Marque a confirmação antes de excluir."
-                )
-
+                st.warning("Marque a confirmação antes de excluir.")
             else:
-
                 excluir_os(os_para_excluir)
 
                 pdf_path = os.path.join(
@@ -302,16 +288,12 @@
                     os.remove(qr_path)
 
                 if st.session_state.ultimo_os_id == os_para_excluir:
-
                     st.session_state.ultimo_pdf_os = None
                     st.session_state.ultimo_os_id = None
                     st.session_state.ultimo_qr_os = None
                     st.session_state.ultimo_link_os = None
 
-                st.success(
-                    f"OS #{os_para_excluir} excluída com sucesso!"
-                )
-
+                st.success(f"OS #{os_para_excluir} excluída com sucesso!")
                 st.rerun()
 
     else:
