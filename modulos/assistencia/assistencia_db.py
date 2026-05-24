@@ -123,38 +123,45 @@ def inicializar_assistencia():
                     f"ALTER TABLE ordens_servico ADD COLUMN {coluna} {tipo}"
                 )
 
+                # ==========================================
+        # GARANTE 3 LOJAS PADRÃO
         # ==========================================
-        # LOJA PADRÃO
-        # ==========================================
 
-        cur.execute("SELECT COUNT(*) FROM lojas")
+        lojas_padrao = [
+            (1, "Loja 1"),
+            (2, "Loja 2"),
+            (3, "Loja 3"),
+        ]
 
-        total_lojas = cur.fetchone()[0]
+        for loja_id, nome_loja in lojas_padrao:
+            cur.execute("SELECT id FROM lojas WHERE id = ?", (loja_id,))
+            existe = cur.fetchone()
 
-        if total_lojas == 0:
-
-            cur.execute("""
-            INSERT INTO lojas (
-                nome,
-                subtitulo,
-                whatsapp,
-                rua,
-                numero,
-                bairro,
-                cidade,
-                cep
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                "CAMARGO CELULARES",
-                "Assistência Técnica Especializada",
-                "(11) 99999-9999",
-                "",
-                "",
-                "",
-                "",
-                ""
-            ))
+            if not existe:
+                cur.execute("""
+                INSERT INTO lojas (
+                    id,
+                    nome,
+                    subtitulo,
+                    whatsapp,
+                    rua,
+                    numero,
+                    bairro,
+                    cidade,
+                    cep
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    loja_id,
+                    nome_loja,
+                    "Assistência Técnica Especializada",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    ""
+                ))
 
         conn.commit()
 
