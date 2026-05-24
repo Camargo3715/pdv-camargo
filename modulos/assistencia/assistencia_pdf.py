@@ -18,7 +18,15 @@ def gerar_pdf_os(
     defeito,
     senha,
     valor_servico,
-    qr_path
+    qr_path,
+    loja_nome="CAMARGO CELULARES",
+    loja_subtitulo="Assistência Técnica Especializada",
+    loja_whatsapp="(11) 99999-9999",
+    loja_rua="",
+    loja_numero="",
+    loja_bairro="",
+    loja_cidade="",
+    loja_cep=""
 ):
     os.makedirs(PASTA_PDFS, exist_ok=True)
 
@@ -27,21 +35,62 @@ def gerar_pdf_os(
     c = canvas.Canvas(caminho_pdf, pagesize=A4)
     largura, altura = A4
 
+    def texto_seguro(valor):
+        return str(valor or "").strip()
+
+    def valor_formatado(valor):
+        try:
+            return f"R$ {float(valor or 0):.2f}"
+        except Exception:
+            return "R$ 0.00"
+
     def desenhar_via(titulo_via, y_inicio):
         y = y_inicio
 
+        endereco_loja = ""
+        if texto_seguro(loja_rua) or texto_seguro(loja_numero):
+            endereco_loja = f"{texto_seguro(loja_rua)}, {texto_seguro(loja_numero)}".strip(", ")
+
+        complemento_loja = ""
+        partes = []
+
+        if texto_seguro(loja_bairro):
+            partes.append(texto_seguro(loja_bairro))
+
+        if texto_seguro(loja_cidade):
+            partes.append(texto_seguro(loja_cidade))
+
+        if texto_seguro(loja_cep):
+            partes.append(f"CEP: {texto_seguro(loja_cep)}")
+
+        complemento_loja = " - ".join(partes)
+
         c.setFont("Helvetica-Bold", 14)
-        c.drawString(50, y, "CAMARGO CELULARES")
+        c.drawString(50, y, texto_seguro(loja_nome) or "CAMARGO CELULARES")
+
         c.setFont("Helvetica-Bold", 10)
         c.drawRightString(largura - 50, y, titulo_via)
         y -= 16
 
         c.setFont("Helvetica", 8)
-        c.drawString(50, y, "Assistência Técnica Especializada")
-        y -= 12
-        c.drawString(50, y, "WhatsApp: (11) 99999-9999")
-        y -= 14
 
+        if texto_seguro(loja_subtitulo):
+            c.drawString(50, y, texto_seguro(loja_subtitulo))
+            y -= 12
+
+        if texto_seguro(loja_whatsapp):
+            c.drawString(50, y, f"WhatsApp: {texto_seguro(loja_whatsapp)}")
+            y -= 12
+
+        if endereco_loja:
+            c.drawString(50, y, endereco_loja)
+            y -= 12
+
+        if complemento_loja:
+            c.drawString(50, y, complemento_loja)
+            y -= 12
+
+        y -= 2
         c.line(50, y, largura - 50, y)
         y -= 18
 
@@ -60,14 +109,14 @@ def gerar_pdf_os(
             ("Modelo", modelo),
             ("Defeito", defeito),
             ("Senha", senha),
-            ("Valor", f"R$ {float(valor_servico or 0):.2f}")
+            ("Valor", valor_formatado(valor_servico))
         ]
 
         for titulo, valor in campos:
             c.setFont("Helvetica-Bold", 8)
             c.drawString(50, y, f"{titulo}:")
             c.setFont("Helvetica", 8)
-            c.drawString(115, y, str(valor or ""))
+            c.drawString(115, y, texto_seguro(valor))
             y -= 10
 
         c.setFont("Helvetica-Bold", 8)

@@ -13,26 +13,134 @@ def tela_assistencia():
 
     if "ultimo_pdf_os" not in st.session_state:
         st.session_state.ultimo_pdf_os = None
+
     if "ultimo_os_id" not in st.session_state:
         st.session_state.ultimo_os_id = None
+
     if "ultimo_qr_os" not in st.session_state:
         st.session_state.ultimo_qr_os = None
+
     if "ultimo_link_os" not in st.session_state:
         st.session_state.ultimo_link_os = None
+
+    # =========================
+    # CONFIGURAÇÃO DAS LOJAS
+    # =========================
+
+    st.subheader("🏪 Configuração das Lojas")
+
+    lojas = listar_lojas()
+
+    nomes_lojas = {
+        loja["nome"]: loja["id"]
+        for loja in lojas
+    }
+
+    loja_config_nome = st.selectbox(
+        "Selecione a loja para editar",
+        list(nomes_lojas.keys()),
+        key="config_loja"
+    )
+
+    loja_config_id = nomes_lojas[loja_config_nome]
+
+    loja_dados = buscar_loja_por_id(loja_config_id)
+
+    with st.expander("Editar dados da loja"):
+
+        nome_loja = st.text_input(
+            "Nome da loja",
+            value=loja_dados["nome"] or "",
+            key="nome_loja"
+        )
+
+        subtitulo_loja = st.text_input(
+            "Subtítulo",
+            value=loja_dados["subtitulo"] or "",
+            key="subtitulo_loja"
+        )
+
+        whatsapp_loja = st.text_input(
+            "WhatsApp",
+            value=loja_dados["whatsapp"] or "",
+            key="whatsapp_loja"
+        )
+
+        rua_loja = st.text_input(
+            "Rua",
+            value=loja_dados["rua"] or "",
+            key="rua_loja"
+        )
+
+        numero_loja = st.text_input(
+            "Número",
+            value=loja_dados["numero"] or "",
+            key="numero_loja"
+        )
+
+        bairro_loja = st.text_input(
+            "Bairro",
+            value=loja_dados["bairro"] or "",
+            key="bairro_loja"
+        )
+
+        cidade_loja = st.text_input(
+            "Cidade",
+            value=loja_dados["cidade"] or "",
+            key="cidade_loja"
+        )
+
+        cep_loja = st.text_input(
+            "CEP",
+            value=loja_dados["cep"] or "",
+            key="cep_loja"
+        )
+
+        if st.button("Salvar dados da loja"):
+
+            atualizar_loja(
+                loja_id=loja_config_id,
+                nome=nome_loja,
+                subtitulo=subtitulo_loja,
+                whatsapp=whatsapp_loja,
+                rua=rua_loja,
+                numero=numero_loja,
+                bairro=bairro_loja,
+                cidade=cidade_loja,
+                cep=cep_loja
+            )
+
+            st.success("Dados da loja atualizados!")
+            st.rerun()
+
+    st.divider()
+
+    # =========================
+    # NOVA OS
+    # =========================
 
     st.subheader("Nova Ordem de Serviço")
 
     with st.form("nova_os"):
 
+        loja_escolhida_nome = st.selectbox(
+            "Loja",
+            list(nomes_lojas.keys())
+        )
+
+        loja_id = nomes_lojas[loja_escolhida_nome]
+
         cliente = st.text_input("Nome do Cliente")
         cpf_rg = st.text_input("CPF ou RG")
         telefone = st.text_input("Telefone")
+
         rua = st.text_input("Rua")
         cep = st.text_input("CEP")
 
         aparelho = st.text_input("Aparelho")
         marca = st.text_input("Marca")
         modelo = st.text_input("Modelo")
+
         defeito = st.text_area("Defeito Informado")
 
         valor_servico = st.number_input(
@@ -48,22 +156,29 @@ def tela_assistencia():
 
         if salvar:
 
-            endereco = f"Rua: {rua} | CEP: {cep}"
+            endereco = rua
 
             os_id, token_publico = criar_os(
                 cliente_nome=cliente,
                 cpf=cpf_rg,
                 telefone=telefone,
                 endereco=endereco,
+                cep=cep,
                 aparelho=aparelho,
                 marca=marca,
                 modelo=modelo,
                 defeito=defeito,
                 senha_aparelho=senha,
-                valor_servico=valor_servico
+                valor_servico=valor_servico,
+                loja_id=loja_id
             )
 
-            caminho_qr, link_os = gerar_qrcode_os(token_publico, os_id)
+            caminho_qr, link_os = gerar_qrcode_os(
+                token_publico,
+                os_id
+            )
+
+            loja_pdf = buscar_loja_por_id(loja_id)
 
             caminho_pdf = gerar_pdf_os(
                 os_id=os_id,
@@ -78,7 +193,16 @@ def tela_assistencia():
                 defeito=defeito,
                 senha=senha,
                 valor_servico=valor_servico,
-                qr_path=caminho_qr
+                qr_path=caminho_qr,
+
+                loja_nome=loja_pdf["nome"],
+                loja_subtitulo=loja_pdf["subtitulo"],
+                loja_whatsapp=loja_pdf["whatsapp"],
+                loja_rua=loja_pdf["rua"],
+                loja_numero=loja_pdf["numero"],
+                loja_bairro=loja_pdf["bairro"],
+                loja_cidade=loja_pdf["cidade"],
+                loja_cep=loja_pdf["cep"]
             )
 
             st.session_state.ultimo_pdf_os = caminho_pdf
@@ -87,11 +211,22 @@ def tela_assistencia():
             st.session_state.ultimo_link_os = link_os
 
     if st.session_state.ultimo_os_id:
-        st.success(f"OS criada com sucesso: #{st.session_state.ultimo_os_id}")
-        st.image(st.session_state.ultimo_qr_os, width=200)
-        st.code(st.session_state.ultimo_link_os)
+
+        st.success(
+            f"OS criada com sucesso: #{st.session_state.ultimo_os_id}"
+        )
+
+        st.image(
+            st.session_state.ultimo_qr_os,
+            width=200
+        )
+
+        st.code(
+            st.session_state.ultimo_link_os
+        )
 
         with open(st.session_state.ultimo_pdf_os, "rb") as f:
+
             st.download_button(
                 "📄 Baixar comprovante PDF",
                 f,
@@ -101,14 +236,20 @@ def tela_assistencia():
 
     st.divider()
 
+    # =========================
+    # LISTAGEM
+    # =========================
+
     st.subheader("Ordens de Serviço")
 
     dados = listar_os()
     lista = []
 
     for os_item in dados:
+
         lista.append({
             "OS": os_item["id"],
+            "Loja": os_item["loja_nome"],
             "Cliente": os_item["cliente_nome"],
             "CPF/RG": os_item["cpf"],
             "Telefone": os_item["telefone"],
@@ -122,19 +263,33 @@ def tela_assistencia():
         })
 
     if lista:
+
         df = pd.DataFrame(lista)
-        st.dataframe(df, use_container_width=True)
+
+        st.dataframe(
+            df,
+            use_container_width=True
+        )
+
     else:
         st.info("Nenhuma OS cadastrada.")
 
     st.divider()
 
+    # =========================
+    # STATUS
+    # =========================
+
     st.subheader("Alterar Status da OS")
 
     if lista:
+
         os_ids = [item["OS"] for item in lista]
 
-        os_selecionada = st.selectbox("Selecione a OS", os_ids)
+        os_selecionada = st.selectbox(
+            "Selecione a OS",
+            os_ids
+        )
 
         novo_status = st.selectbox(
             "Novo status",
@@ -150,17 +305,28 @@ def tela_assistencia():
         )
 
         if st.button("Atualizar Status"):
-            atualizar_status_os(os_selecionada, novo_status)
+
+            atualizar_status_os(
+                os_selecionada,
+                novo_status
+            )
+
             st.success("Status atualizado com sucesso!")
             st.rerun()
+
     else:
         st.info("Crie uma OS primeiro para alterar o status.")
 
     st.divider()
 
+    # =========================
+    # EXCLUIR OS
+    # =========================
+
     st.subheader("Excluir OS")
 
     if lista:
+
         os_ids_excluir = [item["OS"] for item in lista]
 
         os_para_excluir = st.selectbox(
@@ -177,12 +343,24 @@ def tela_assistencia():
         if st.button("🗑️ Excluir OS", type="secondary"):
 
             if not confirmar_exclusao:
-                st.warning("Marque a confirmação antes de excluir.")
+
+                st.warning(
+                    "Marque a confirmação antes de excluir."
+                )
+
             else:
+
                 excluir_os(os_para_excluir)
 
-                pdf_path = os.path.join("pdfs_os", f"os_{os_para_excluir}.pdf")
-                qr_path = os.path.join("qrcodes_os", f"os_{os_para_excluir}.png")
+                pdf_path = os.path.join(
+                    "pdfs_os",
+                    f"os_{os_para_excluir}.pdf"
+                )
+
+                qr_path = os.path.join(
+                    "qrcodes_os",
+                    f"os_{os_para_excluir}.png"
+                )
 
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
@@ -191,12 +369,17 @@ def tela_assistencia():
                     os.remove(qr_path)
 
                 if st.session_state.ultimo_os_id == os_para_excluir:
+
                     st.session_state.ultimo_pdf_os = None
                     st.session_state.ultimo_os_id = None
                     st.session_state.ultimo_qr_os = None
                     st.session_state.ultimo_link_os = None
 
-                st.success(f"OS #{os_para_excluir} excluída com sucesso!")
+                st.success(
+                    f"OS #{os_para_excluir} excluída com sucesso!"
+                )
+
                 st.rerun()
+
     else:
         st.info("Nenhuma OS cadastrada para excluir.")
