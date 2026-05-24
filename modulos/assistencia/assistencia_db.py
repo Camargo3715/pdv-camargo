@@ -26,45 +26,44 @@ def inicializar_assistencia():
         CREATE TABLE IF NOT EXISTS ordens_servico (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             loja_id INTEGER NOT NULL DEFAULT 1,
-
             cliente_nome TEXT NOT NULL,
             cpf TEXT,
             telefone TEXT,
             endereco TEXT,
-
             aparelho TEXT,
             marca TEXT,
             modelo TEXT,
             imei TEXT,
-
             defeito TEXT,
             senha_aparelho TEXT,
             checklist TEXT,
-
             status TEXT NOT NULL DEFAULT 'EM ANALISE',
             token_publico TEXT UNIQUE,
-
             orcamento REAL NOT NULL DEFAULT 0,
             tecnico TEXT,
-
             data_entrada TEXT,
             data_saida TEXT,
             observacoes TEXT
         )
         """)
 
-        if not coluna_existe(conn, "ordens_servico", "token_publico"):
-            cur.execute("ALTER TABLE ordens_servico ADD COLUMN token_publico TEXT")
-
-        if not coluna_existe(conn, "ordens_servico", "orcamento"):
-            cur.execute("ALTER TABLE ordens_servico ADD COLUMN orcamento REAL NOT NULL DEFAULT 0")
+        for coluna, tipo in [
+            ("cpf", "TEXT"),
+            ("endereco", "TEXT"),
+            ("token_publico", "TEXT"),
+            ("orcamento", "REAL NOT NULL DEFAULT 0"),
+        ]:
+            if not coluna_existe(conn, "ordens_servico", coluna):
+                cur.execute(f"ALTER TABLE ordens_servico ADD COLUMN {coluna} {tipo}")
 
         conn.commit()
 
 
 def criar_os(
     cliente_nome,
+    cpf,
     telefone,
+    endereco,
     aparelho,
     marca,
     modelo,
@@ -82,7 +81,9 @@ def criar_os(
         INSERT INTO ordens_servico (
             loja_id,
             cliente_nome,
+            cpf,
             telefone,
+            endereco,
             aparelho,
             marca,
             modelo,
@@ -92,11 +93,13 @@ def criar_os(
             orcamento,
             data_entrada
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             loja_id,
             cliente_nome,
+            cpf,
             telefone,
+            endereco,
             aparelho,
             marca,
             modelo,
@@ -114,42 +117,33 @@ def criar_os(
 def listar_os():
     with conectar() as conn:
         cur = conn.cursor()
-        cur.execute("""
-        SELECT *
-        FROM ordens_servico
-        ORDER BY id DESC
-        """)
+        cur.execute("SELECT * FROM ordens_servico ORDER BY id DESC")
         return cur.fetchall()
 
 
 def buscar_os_por_id(os_id: int):
     with conectar() as conn:
         cur = conn.cursor()
-        cur.execute("""
-        SELECT *
-        FROM ordens_servico
-        WHERE id = ?
-        """, (int(os_id),))
+        cur.execute("SELECT * FROM ordens_servico WHERE id = ?", (int(os_id),))
         return cur.fetchone()
 
 
 def buscar_os_por_token(token_publico: str):
     with conectar() as conn:
         cur = conn.cursor()
-        cur.execute("""
-        SELECT *
-        FROM ordens_servico
-        WHERE token_publico = ?
-        """, (str(token_publico),))
+        cur.execute("SELECT * FROM ordens_servico WHERE token_publico = ?", (str(token_publico),))
         return cur.fetchone()
 
 
 def atualizar_status_os(os_id: int, novo_status: str):
     with conectar() as conn:
         cur = conn.cursor()
-        cur.execute("""
-        UPDATE ordens_servico
-        SET status = ?
-        WHERE id = ?
-        """, (novo_status, int(os_id)))
+        cur.execute("UPDATE ordens_servico SET status = ? WHERE id = ?", (novo_status, int(os_id)))
+        conn.commit()
+
+
+def excluir_os(os_id: int):
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM ordens_servico WHERE id = ?", (int(os_id),))
         conn.commit()

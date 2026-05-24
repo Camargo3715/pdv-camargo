@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 
@@ -24,7 +25,11 @@ def tela_assistencia():
     with st.form("nova_os"):
 
         cliente = st.text_input("Nome do Cliente")
+        cpf_rg = st.text_input("CPF ou RG")
         telefone = st.text_input("Telefone")
+        rua = st.text_input("Rua")
+        cep = st.text_input("CEP")
+
         aparelho = st.text_input("Aparelho")
         marca = st.text_input("Marca")
         modelo = st.text_input("Modelo")
@@ -43,9 +48,13 @@ def tela_assistencia():
 
         if salvar:
 
+            endereco = f"Rua: {rua} | CEP: {cep}"
+
             os_id, token_publico = criar_os(
                 cliente_nome=cliente,
+                cpf=cpf_rg,
                 telefone=telefone,
+                endereco=endereco,
                 aparelho=aparelho,
                 marca=marca,
                 modelo=modelo,
@@ -59,7 +68,10 @@ def tela_assistencia():
             caminho_pdf = gerar_pdf_os(
                 os_id=os_id,
                 cliente=cliente,
+                cpf_rg=cpf_rg,
                 telefone=telefone,
+                rua=rua,
+                cep=cep,
                 aparelho=aparelho,
                 marca=marca,
                 modelo=modelo,
@@ -94,17 +106,19 @@ def tela_assistencia():
     dados = listar_os()
     lista = []
 
-    for os in dados:
+    for os_item in dados:
         lista.append({
-            "OS": os["id"],
-            "Cliente": os["cliente_nome"],
-            "Telefone": os["telefone"],
-            "Aparelho": os["aparelho"],
-            "Marca": os["marca"],
-            "Modelo": os["modelo"],
-            "Valor": f"R$ {float(os['orcamento'] or 0):.2f}".replace(".", ","),
-            "Status": os["status"],
-            "Entrada": os["data_entrada"]
+            "OS": os_item["id"],
+            "Cliente": os_item["cliente_nome"],
+            "CPF/RG": os_item["cpf"],
+            "Telefone": os_item["telefone"],
+            "Endereço": os_item["endereco"],
+            "Aparelho": os_item["aparelho"],
+            "Marca": os_item["marca"],
+            "Modelo": os_item["modelo"],
+            "Valor": f"R$ {float(os_item['orcamento'] or 0):.2f}".replace(".", ","),
+            "Status": os_item["status"],
+            "Entrada": os_item["data_entrada"]
         })
 
     if lista:
@@ -141,3 +155,48 @@ def tela_assistencia():
             st.rerun()
     else:
         st.info("Crie uma OS primeiro para alterar o status.")
+
+    st.divider()
+
+    st.subheader("Excluir OS")
+
+    if lista:
+        os_ids_excluir = [item["OS"] for item in lista]
+
+        os_para_excluir = st.selectbox(
+            "Selecione a OS para excluir",
+            os_ids_excluir,
+            key="select_excluir_os"
+        )
+
+        confirmar_exclusao = st.checkbox(
+            f"Confirmo que quero excluir a OS #{os_para_excluir}",
+            key="confirmar_exclusao_os"
+        )
+
+        if st.button("🗑️ Excluir OS", type="secondary"):
+
+            if not confirmar_exclusao:
+                st.warning("Marque a confirmação antes de excluir.")
+            else:
+                excluir_os(os_para_excluir)
+
+                pdf_path = os.path.join("pdfs_os", f"os_{os_para_excluir}.pdf")
+                qr_path = os.path.join("qrcodes_os", f"os_{os_para_excluir}.png")
+
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+
+                if os.path.exists(qr_path):
+                    os.remove(qr_path)
+
+                if st.session_state.ultimo_os_id == os_para_excluir:
+                    st.session_state.ultimo_pdf_os = None
+                    st.session_state.ultimo_os_id = None
+                    st.session_state.ultimo_qr_os = None
+                    st.session_state.ultimo_link_os = None
+
+                st.success(f"OS #{os_para_excluir} excluída com sucesso!")
+                st.rerun()
+    else:
+        st.info("Nenhuma OS cadastrada para excluir.")
