@@ -11,6 +11,8 @@ def tela_assistencia():
 
     st.title("🔧 Assistência Técnica")
 
+    loja_atual_id = st.session_state.get("loja_id", 1)
+
     if "ultimo_pdf_os" not in st.session_state:
         st.session_state.ultimo_pdf_os = None
     if "ultimo_os_id" not in st.session_state:
@@ -20,40 +22,38 @@ def tela_assistencia():
     if "ultimo_link_os" not in st.session_state:
         st.session_state.ultimo_link_os = None
 
-    st.subheader("🏪 Configuração das Lojas")
-
     lojas = listar_lojas()
 
     if not lojas:
-        criar_loja(nome="CAMARGO CELULARES")
+        criar_loja(nome="Loja 1")
+        criar_loja(nome="Loja 2")
+        criar_loja(nome="Loja 3")
         lojas = listar_lojas()
 
-    loja_ids = [loja["id"] for loja in lojas]
+    loja_atual = buscar_loja_por_id(loja_atual_id)
 
-    loja_config_id = st.selectbox(
-        "Selecione a loja para editar",
-        loja_ids,
-        format_func=lambda loja_id: buscar_loja_por_id(loja_id)["nome"],
-        key="config_loja_id"
-    )
+    if loja_atual:
+        st.info(f"Loja atual: {loja_atual['nome']}")
 
-    loja_dados = buscar_loja_por_id(loja_config_id)
+    st.subheader("🏪 Configuração da Loja Atual")
 
-    with st.expander("Editar dados da loja"):
+    loja_dados = buscar_loja_por_id(loja_atual_id)
 
-        nome_loja = st.text_input("Nome da loja", value=loja_dados["nome"] or "", key=f"nome_loja_{loja_config_id}")
-        subtitulo_loja = st.text_input("Subtítulo", value=loja_dados["subtitulo"] or "", key=f"subtitulo_loja_{loja_config_id}")
-        whatsapp_loja = st.text_input("WhatsApp", value=loja_dados["whatsapp"] or "", key=f"whatsapp_loja_{loja_config_id}")
-        rua_loja = st.text_input("Rua", value=loja_dados["rua"] or "", key=f"rua_loja_{loja_config_id}")
-        numero_loja = st.text_input("Número", value=loja_dados["numero"] or "", key=f"numero_loja_{loja_config_id}")
-        bairro_loja = st.text_input("Bairro", value=loja_dados["bairro"] or "", key=f"bairro_loja_{loja_config_id}")
-        cidade_loja = st.text_input("Cidade", value=loja_dados["cidade"] or "", key=f"cidade_loja_{loja_config_id}")
-        cep_loja = st.text_input("CEP", value=loja_dados["cep"] or "", key=f"cep_loja_{loja_config_id}")
+    with st.expander("Editar dados da loja atual"):
 
-        if st.button("Salvar dados da loja", key=f"salvar_loja_{loja_config_id}"):
+        nome_loja = st.text_input("Nome da loja", value=loja_dados["nome"] or "", key=f"nome_loja_{loja_atual_id}")
+        subtitulo_loja = st.text_input("Subtítulo", value=loja_dados["subtitulo"] or "", key=f"subtitulo_loja_{loja_atual_id}")
+        whatsapp_loja = st.text_input("WhatsApp", value=loja_dados["whatsapp"] or "", key=f"whatsapp_loja_{loja_atual_id}")
+        rua_loja = st.text_input("Rua", value=loja_dados["rua"] or "", key=f"rua_loja_{loja_atual_id}")
+        numero_loja = st.text_input("Número", value=loja_dados["numero"] or "", key=f"numero_loja_{loja_atual_id}")
+        bairro_loja = st.text_input("Bairro", value=loja_dados["bairro"] or "", key=f"bairro_loja_{loja_atual_id}")
+        cidade_loja = st.text_input("Cidade", value=loja_dados["cidade"] or "", key=f"cidade_loja_{loja_atual_id}")
+        cep_loja = st.text_input("CEP", value=loja_dados["cep"] or "", key=f"cep_loja_{loja_atual_id}")
+
+        if st.button("Salvar dados da loja atual", key=f"salvar_loja_{loja_atual_id}"):
 
             atualizar_loja(
-                loja_id=loja_config_id,
+                loja_id=loja_atual_id,
                 nome=nome_loja,
                 subtitulo=subtitulo_loja,
                 whatsapp=whatsapp_loja,
@@ -71,21 +71,7 @@ def tela_assistencia():
 
     st.subheader("Nova Ordem de Serviço")
 
-    lojas = listar_lojas()
-
-    nomes_lojas = {
-        f"{loja['nome']} - Loja {loja['id']}": loja["id"]
-        for loja in lojas
-    }
-
     with st.form("nova_os"):
-
-        loja_escolhida_nome = st.selectbox(
-            "Loja",
-            list(nomes_lojas.keys())
-        )
-
-        loja_id = nomes_lojas[loja_escolhida_nome]
 
         cliente = st.text_input("Nome do Cliente")
         cpf_rg = st.text_input("CPF ou RG")
@@ -127,12 +113,12 @@ def tela_assistencia():
                 defeito=defeito,
                 senha_aparelho=senha,
                 valor_servico=valor_servico,
-                loja_id=loja_id
+                loja_id=loja_atual_id
             )
 
             caminho_qr, link_os = gerar_qrcode_os(token_publico, os_id)
 
-            loja_pdf = buscar_loja_por_id(loja_id)
+            loja_pdf = buscar_loja_por_id(loja_atual_id)
 
             caminho_pdf = gerar_pdf_os(
                 os_id=os_id,
@@ -166,9 +152,7 @@ def tela_assistencia():
     if st.session_state.ultimo_os_id:
 
         st.success(f"OS criada com sucesso: #{st.session_state.ultimo_os_id}")
-
         st.image(st.session_state.ultimo_qr_os, width=200)
-
         st.code(st.session_state.ultimo_link_os)
 
         with open(st.session_state.ultimo_pdf_os, "rb") as f:
@@ -183,7 +167,7 @@ def tela_assistencia():
 
     st.subheader("Ordens de Serviço")
 
-    dados = listar_os()
+    dados = listar_os(loja_atual_id)
     lista = []
 
     for os_item in dados:
@@ -206,7 +190,7 @@ def tela_assistencia():
         df = pd.DataFrame(lista)
         st.dataframe(df, use_container_width=True)
     else:
-        st.info("Nenhuma OS cadastrada.")
+        st.info("Nenhuma OS cadastrada nesta loja.")
 
     st.divider()
 
@@ -215,10 +199,7 @@ def tela_assistencia():
     if lista:
         os_ids = [item["OS"] for item in lista]
 
-        os_selecionada = st.selectbox(
-            "Selecione a OS",
-            os_ids
-        )
+        os_selecionada = st.selectbox("Selecione a OS", os_ids)
 
         novo_status = st.selectbox(
             "Novo status",
@@ -237,7 +218,8 @@ def tela_assistencia():
 
             atualizar_status_os(
                 os_selecionada,
-                novo_status
+                novo_status,
+                loja_atual_id
             )
 
             st.success("Status atualizado com sucesso!")
@@ -269,17 +251,10 @@ def tela_assistencia():
             if not confirmar_exclusao:
                 st.warning("Marque a confirmação antes de excluir.")
             else:
-                excluir_os(os_para_excluir)
+                excluir_os(os_para_excluir, loja_atual_id)
 
-                pdf_path = os.path.join(
-                    "pdfs_os",
-                    f"os_{os_para_excluir}.pdf"
-                )
-
-                qr_path = os.path.join(
-                    "qrcodes_os",
-                    f"os_{os_para_excluir}.png"
-                )
+                pdf_path = os.path.join("pdfs_os", f"os_{os_para_excluir}.pdf")
+                qr_path = os.path.join("qrcodes_os", f"os_{os_para_excluir}.png")
 
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
@@ -297,4 +272,4 @@ def tela_assistencia():
                 st.rerun()
 
     else:
-        st.info("Nenhuma OS cadastrada para excluir.")
+        st.info("Nenhuma OS cadastrada para excluir nesta loja.")
