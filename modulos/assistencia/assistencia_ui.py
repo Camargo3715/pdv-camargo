@@ -41,6 +41,16 @@ def tela_assistencia():
     if "ultimo_link_os" not in st.session_state:
         st.session_state.ultimo_link_os = None
 
+    if st.session_state.get("limpar_form_os"):
+        for campo in [
+            "os_cliente", "os_cpf_rg", "os_telefone", "os_rua", "os_cep",
+            "os_aparelho", "os_marca", "os_modelo", "os_defeito", "os_senha"
+        ]:
+            st.session_state[campo] = ""
+
+        st.session_state["os_valor_servico"] = 0.0
+        st.session_state.limpar_form_os = False
+
     lojas = listar_lojas()
 
     if not lojas:
@@ -59,7 +69,6 @@ def tela_assistencia():
     loja_dados = buscar_loja_por_id(loja_atual_id)
 
     with st.expander("Editar dados da loja atual"):
-
         nome_loja = st.text_input("Nome da loja", value=loja_dados["nome"] or "", key=f"nome_loja_{loja_atual_id}")
         subtitulo_loja = st.text_input("Subtítulo", value=loja_dados["subtitulo"] or "", key=f"subtitulo_loja_{loja_atual_id}")
         whatsapp_loja = st.text_input("WhatsApp", value=loja_dados["whatsapp"] or "", key=f"whatsapp_loja_{loja_atual_id}")
@@ -70,7 +79,6 @@ def tela_assistencia():
         cep_loja = st.text_input("CEP", value=loja_dados["cep"] or "", key=f"cep_loja_{loja_atual_id}")
 
         if st.button("Salvar dados da loja atual", key=f"salvar_loja_{loja_atual_id}"):
-
             atualizar_loja(
                 loja_id=loja_atual_id,
                 nome=nome_loja,
@@ -82,7 +90,6 @@ def tela_assistencia():
                 cidade=cidade_loja,
                 cep=cep_loja
             )
-
             st.success("Dados da loja atualizados!")
             st.rerun()
 
@@ -92,32 +99,32 @@ def tela_assistencia():
 
     with st.form("nova_os"):
 
-        cliente = st.text_input("Nome do Cliente")
-        cpf_rg = st.text_input("CPF ou RG")
-        telefone = st.text_input("Telefone")
+        cliente = st.text_input("Nome do Cliente", key="os_cliente")
+        cpf_rg = st.text_input("CPF ou RG", key="os_cpf_rg")
+        telefone = st.text_input("Telefone", key="os_telefone")
 
-        rua = st.text_input("Rua")
-        cep = st.text_input("CEP")
+        rua = st.text_input("Rua", key="os_rua")
+        cep = st.text_input("CEP", key="os_cep")
 
-        aparelho = st.text_input("Aparelho")
-        marca = st.text_input("Marca")
-        modelo = st.text_input("Modelo")
+        aparelho = st.text_input("Aparelho", key="os_aparelho")
+        marca = st.text_input("Marca", key="os_marca")
+        modelo = st.text_input("Modelo", key="os_modelo")
 
-        defeito = st.text_area("Defeito Informado")
+        defeito = st.text_area("Defeito Informado", key="os_defeito")
 
         valor_servico = st.number_input(
             "Valor do serviço",
             min_value=0.0,
             step=10.0,
-            format="%.2f"
+            format="%.2f",
+            key="os_valor_servico"
         )
 
-        senha = st.text_input("Senha do aparelho")
+        senha = st.text_input("Senha do aparelho", key="os_senha")
 
         salvar = st.form_submit_button("Criar OS")
 
         if salvar:
-
             endereco = rua
 
             os_id, token_publico = criar_os(
@@ -167,9 +174,11 @@ def tela_assistencia():
             st.session_state.ultimo_os_id = os_id
             st.session_state.ultimo_qr_os = caminho_qr
             st.session_state.ultimo_link_os = link_os
+            st.session_state.limpar_form_os = True
+
+            st.rerun()
 
     if st.session_state.ultimo_os_id:
-
         st.success(f"OS criada com sucesso: #{st.session_state.ultimo_os_id}")
         st.image(st.session_state.ultimo_qr_os, width=200)
         st.code(st.session_state.ultimo_link_os)
@@ -217,7 +226,6 @@ def tela_assistencia():
 
     if lista:
         os_ids = [item["OS"] for item in lista]
-
         os_selecionada = st.selectbox("Selecione a OS", os_ids)
 
         novo_status = st.selectbox(
@@ -234,16 +242,9 @@ def tela_assistencia():
         )
 
         if st.button("Atualizar Status"):
-
-            atualizar_status_os(
-                os_selecionada,
-                novo_status,
-                loja_atual_id
-            )
-
+            atualizar_status_os(os_selecionada, novo_status, loja_atual_id)
             st.success("Status atualizado com sucesso!")
             st.rerun()
-
     else:
         st.info("Crie uma OS primeiro para alterar o status.")
 
@@ -266,7 +267,6 @@ def tela_assistencia():
         )
 
         if st.button("🗑️ Excluir OS", type="secondary"):
-
             if not confirmar_exclusao:
                 st.warning("Marque a confirmação antes de excluir.")
             else:
@@ -289,6 +289,5 @@ def tela_assistencia():
 
                 st.success(f"OS #{os_para_excluir} excluída com sucesso!")
                 st.rerun()
-
     else:
         st.info("Nenhuma OS cadastrada para excluir nesta loja.")
