@@ -11,7 +11,7 @@ def tela_assistencia():
 
     st.title("🔧 Assistência Técnica")
 
-    loja_atual_id = st.session_state.get("loja_id", 1)
+    loja_atual_id = st.session_state.get("loja_id_ativa", 1)
 
     if "ultimo_pdf_os" not in st.session_state:
         st.session_state.ultimo_pdf_os = None
