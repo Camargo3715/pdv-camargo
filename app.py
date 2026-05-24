@@ -292,7 +292,7 @@ def tabela_existe(conn: sqlite3.Connection, nome: str) -> bool:
 def coluna_existe(conn: sqlite3.Connection, tabela: str, coluna: str) -> bool:
     cur = conn.cursor()
     cur.execute(f"PRAGMA table_info({tabela})")
-    cols = [r[1] for r in cur.fetchall()]  # r[1] = name
+    cols = [r[1] for r in cur.fetchall()]
     return coluna in cols
 
 
@@ -303,24 +303,65 @@ def add_coluna_se_nao_existe(conn: sqlite3.Connection, tabela: str, coluna_sql: 
 
 def garantir_lojas_padrao(conn: sqlite3.Connection):
     """
-    Garante a tabela lojas e cadastra 3 lojas padrão se estiver vazia.
+    Garante a tabela lojas completa e cadastra 3 lojas padrão se estiver vazia.
     """
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS lojas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nome TEXT NOT NULL,
-            ativa INTEGER NOT NULL DEFAULT 1
+            ativa INTEGER NOT NULL DEFAULT 1,
+            subtitulo TEXT,
+            whatsapp TEXT,
+            rua TEXT,
+            numero TEXT,
+            bairro TEXT,
+            cidade TEXT,
+            cep TEXT
         )
         """
     )
+
+    for coluna_sql, nome_coluna in [
+        ("ativa INTEGER NOT NULL DEFAULT 1", "ativa"),
+        ("subtitulo TEXT", "subtitulo"),
+        ("whatsapp TEXT", "whatsapp"),
+        ("rua TEXT", "rua"),
+        ("numero TEXT", "numero"),
+        ("bairro TEXT", "bairro"),
+        ("cidade TEXT", "cidade"),
+        ("cep TEXT", "cep"),
+    ]:
+        add_coluna_se_nao_existe(conn, "lojas", coluna_sql, nome_coluna)
+
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM lojas")
     total = int(cur.fetchone()[0] or 0)
+
     if total == 0:
-        conn.execute("INSERT INTO lojas (nome) VALUES (?)", ("Loja 1",))
-        conn.execute("INSERT INTO lojas (nome) VALUES (?)", ("Loja 2",))
-        conn.execute("INSERT INTO lojas (nome) VALUES (?)", ("Loja 3",))
+        lojas_padrao = [
+            ("Loja 1", "Assistência Técnica Especializada", "", "", "", "", "", ""),
+            ("Loja 2", "Assistência Técnica Especializada", "", "", "", "", "", ""),
+            ("Loja 3", "Assistência Técnica Especializada", "", "", "", "", "", ""),
+        ]
+
+        conn.executemany(
+            """
+            INSERT INTO lojas (
+                nome,
+                subtitulo,
+                whatsapp,
+                rua,
+                numero,
+                bairro,
+                cidade,
+                cep
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            lojas_padrao
+        )
+
     conn.commit()
 
 
@@ -332,7 +373,6 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     if not tabela_existe(conn, "produtos"):
         return
 
-    # Se já tem loja_id, assume que já é multi-loja
     if coluna_existe(conn, "produtos", "loja_id"):
         return
 
@@ -354,18 +394,32 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
         return
 
     rows = []
+
     try:
         if has_codigo:
             cur.execute("SELECT id, codigo, nome, preco_custo, preco_venda, quantidade FROM produtos")
             rows = cur.fetchall()
         else:
             col_preco = "Preço" if "Preço" in cols else ("Preco" if "Preco" in cols else None)
+
             if col_preco is None:
                 return
+
             cur.execute(f"SELECT id, Produto, {col_preco}, Quantidade FROM produtos")
             raw = cur.fetchall()
+
             for (pid, prod_nome, pv, qtd) in raw:
-                rows.append((pid, str(pid), str(prod_nome or ""), 0.0, float(pv or 0), int(qtd or 0)))
+                rows.append(
+                    (
+                        pid,
+                        str(pid),
+                        str(prod_nome or ""),
+                        0.0,
+                        float(pv or 0),
+                        int(qtd or 0)
+                    )
+                )
+
     except Exception:
         return
 
@@ -388,10 +442,25 @@ def migrar_produtos_para_multiloja(conn: sqlite3.Connection):
     for (pid, codigo, nome, pc, pv, qtd) in rows:
         conn.execute(
             """
-            INSERT INTO produtos_new (id, loja_id, codigo, nome, preco_custo, preco_venda, quantidade)
+            INSERT INTO produtos_new (
+                id,
+                loja_id,
+                codigo,
+                nome,
+                preco_custo,
+                preco_venda,
+                quantidade
+            )
             VALUES (?, 1, ?, ?, ?, ?, ?)
             """,
-            (pid, (str(codigo) or "").strip(), str(nome or ""), float(pc or 0), float(pv or 0), int(qtd or 0)),
+            (
+                pid,
+                (str(codigo) or "").strip(),
+                str(nome or ""),
+                float(pc or 0),
+                float(pv or 0),
+                int(qtd or 0)
+            )
         )
 
     conn.execute("DROP TABLE produtos")
