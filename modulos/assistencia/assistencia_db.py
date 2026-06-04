@@ -1,8 +1,9 @@
+import os
 import sqlite3
 import secrets
 from datetime import datetime
 
-DB_PATH = "pdv.db"
+DB_PATH = os.getenv("DB_PATH", "/var/data/pdv.db")
 
 
 def conectar():

@@ -33,18 +33,19 @@ DEFAULT_DB_LOCAL = os.path.join(BASE_DIR, "pdv.db")
 # Detecta Render
 IS_RENDER = bool(os.getenv("RENDER")) or bool(os.getenv("RENDER_SERVICE_ID"))
 
-# No Render Free, /var/data NÃO existe (sem Disk). Então usa /tmp.
-# Se você estiver no Render com Disk, set DATABASE_PATH=/var/data/pdv.db
+# Banco persistente
 if IS_RENDER:
-    DB_PATH = os.getenv("DATABASE_PATH", "/tmp/pdv.db")
+    DB_PATH = os.getenv("DATABASE_PATH", "/var/data/pdv.db")
 else:
     DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB_LOCAL)
 
 # Garante que a pasta do banco exista
 try:
     db_dir = os.path.dirname(DB_PATH)
+
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
+
 except Exception:
     pass
 
