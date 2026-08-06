@@ -1966,8 +1966,20 @@ if "token" in params:
         st.error("OS não encontrada.")
         st.stop()
 
+    # Data de emissão (data de criação da OS)
+    data_emissao = ordem["data_entrada"]
+
+    try:
+        data_emissao = datetime.strptime(
+            data_emissao,
+            "%Y-%m-%d %H:%M:%S"
+        ).strftime("%d/%m/%Y às %H:%M")
+    except Exception:
+        pass
+
     st.success(f"OS #{ordem['id']} encontrada")
 
+    st.write(f"**Data de emissão:** {data_emissao}")
     st.write(f"**Cliente:** {ordem['cliente_nome']}")
     st.write(f"**Aparelho:** {ordem['aparelho']}")
     st.write(f"**Marca:** {ordem['marca']}")
@@ -2773,7 +2785,7 @@ elif pagina == "📦 Estoque":
         st.dataframe(df_show, width="stretch", hide_index=True)
 
 
-
+        # =========================
         # ✅ NOVO: EDITAR PRODUTO EXISTENTE
         # =========================
         st.divider()

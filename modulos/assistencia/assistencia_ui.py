@@ -146,29 +146,34 @@ def tela_assistencia():
 
             loja_pdf = buscar_loja_por_id(loja_atual_id)
 
+            os_criada = buscar_os_por_id(os_id, loja_atual_id)
+
             caminho_pdf = gerar_pdf_os(
-                os_id=os_id,
-                cliente=cliente,
-                cpf_rg=cpf_rg,
-                telefone=telefone,
-                rua=rua,
-                cep=cep,
-                aparelho=aparelho,
-                marca=marca,
-                modelo=modelo,
-                defeito=defeito,
-                senha=senha,
-                valor_servico=valor_servico,
-                qr_path=caminho_qr,
-                loja_nome=loja_pdf["nome"],
-                loja_subtitulo=loja_pdf["subtitulo"],
-                loja_whatsapp=loja_pdf["whatsapp"],
-                loja_rua=loja_pdf["rua"],
-                loja_numero=loja_pdf["numero"],
-                loja_bairro=loja_pdf["bairro"],
-                loja_cidade=loja_pdf["cidade"],
-                loja_cep=loja_pdf["cep"]
-            )
+    os_id=os_id,
+    cliente=cliente,
+    cpf_rg=cpf_rg,
+    telefone=telefone,
+    rua=rua,
+    cep=cep,
+    aparelho=aparelho,
+    marca=marca,
+    modelo=modelo,
+    defeito=defeito,
+    senha=senha,
+    valor_servico=valor_servico,
+    qr_path=caminho_qr,
+    loja_nome=loja_pdf["nome"],
+    loja_subtitulo=loja_pdf["subtitulo"],
+    loja_whatsapp=loja_pdf["whatsapp"],
+    loja_rua=loja_pdf["rua"],
+    loja_numero=loja_pdf["numero"],
+    loja_bairro=loja_pdf["bairro"],
+    loja_cidade=loja_pdf["cidade"],
+    loja_cep=loja_pdf["cep"],
+    data_emissao=os_criada["data_entrada"]
+)
+ 
+            
 
             st.session_state.ultimo_pdf_os = caminho_pdf
             st.session_state.ultimo_os_id = os_id
