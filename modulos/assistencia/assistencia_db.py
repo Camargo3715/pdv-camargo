@@ -2,7 +2,7 @@ import os
 import sqlite3
 import secrets
 from datetime import datetime
-
+from zoneinfo import ZoneInfo
 DB_PATH = os.getenv("DB_PATH", "/var/data/pdv.db")
 
 
@@ -342,7 +342,7 @@ def criar_os(
             senha_aparelho,
             token_publico,
             float(valor_servico or 0),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d %H:%M:%S")
         ))
 
         conn.commit()
